@@ -5,19 +5,24 @@
 CREATE TABLE IF NOT EXISTS settings (
   id INTEGER PRIMARY KEY,                   -- always 1
   about TEXT NOT NULL DEFAULT '',           -- what we sell, in a sentence: frames every draft
+  mailbox TEXT,                             -- the Gmail account emails go out from (its address); nothing is sent until one is picked
   signature TEXT NOT NULL DEFAULT '',       -- added under every email when it is sent
+  opt_out TEXT NOT NULL DEFAULT 'Not for you? Reply "unsubscribe" and I won''t email you again.', -- under the signature on every email, never empty
   daily_cap INTEGER NOT NULL DEFAULT 30,    -- emails a day, all campaigns together
+  ramp_from TEXT,                           -- YYYY-MM-DD a new mailbox started sending: the daily cap climbs from it
   send_from TEXT NOT NULL DEFAULT '09:00',  -- the sending window, local time
   send_until TEXT NOT NULL DEFAULT '17:00',
   timezone TEXT NOT NULL DEFAULT 'UTC',     -- IANA name, e.g. Europe/Amsterdam
   weekdays_only INTEGER NOT NULL DEFAULT 1,
   crm_app_id TEXT,                          -- a sibling CRM app that sends, replies and meetings are written to
-  mailbox TEXT,                             -- the address the connected Gmail sends from
+  crm_error TEXT,                           -- the last write to it that failed
   running_until TEXT,                       -- a run's lease; a second run waits it out
   job_id TEXT,                              -- the next run booked on the platform queue
   next_run_at TEXT,
   last_run_at TEXT,
   last_error TEXT,
+  last_sent_at TEXT,                        -- sends are spaced out across the window from here
+  inbox_checked_at TEXT,                    -- received mail is read from here on the next run
   calendar_checked_at TEXT,                 -- when booked meetings were last looked for
   updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -34,7 +39,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
--- One step of a campaign. Step 1 starts a thread; later email steps reply in it.
+-- One step of a campaign. The first email starts a thread; later emails reply in it.
 CREATE TABLE IF NOT EXISTS steps (
   id TEXT PRIMARY KEY,
   campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
@@ -62,6 +67,7 @@ CREATE TABLE IF NOT EXISTS people (
   source TEXT NOT NULL DEFAULT 'manual',    -- 'manual' | 'csv' | 'crm' | 'agent'
   crm_contact_id TEXT,                      -- their contact in the connected CRM, once known
   unsubscribed_at TEXT,                     -- asked not to be written to: never added to a campaign again
+  bounced_at TEXT,                          -- the address bounced: never written to again
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -76,9 +82,8 @@ CREATE TABLE IF NOT EXISTS enrollments (
   due_at TEXT,                              -- when that step is due
   thread_id TEXT,                           -- the Gmail thread, once the first email is out
   last_sent_at TEXT,
-  paused_until TEXT,                        -- an out-of-office reply
+  paused_until TEXT,                        -- an out-of-office reply: resumes after it
   reason TEXT,                              -- why it stopped or paused, in words
-  checked_at TEXT,                          -- when the thread was last read for replies
   enrolled_by TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now')),
@@ -92,28 +97,55 @@ CREATE TABLE IF NOT EXISTS touches (
   step_id TEXT REFERENCES steps(id) ON DELETE SET NULL,
   position INTEGER NOT NULL,                -- the step's number when the touch was made
   channel TEXT NOT NULL,                    -- 'email' | 'call' | 'linkedin' | 'task'
-  status TEXT NOT NULL,                     -- 'research' | 'drafting' | 'review' | 'approved' | 'sent' | 'done' | 'skipped' | 'failed'
-  subject TEXT,                             -- the draft as written (step 1 only has a subject)
+  status TEXT NOT NULL,                     -- email: 'research' | 'drafting' | 'review' | 'approved' | 'sending' | 'sent'; others: 'todo' | 'done'; any: 'skipped' | 'failed'
+  draft_subject TEXT,                       -- the draft as its writer wrote it (only an email that starts a thread has a subject)
+  draft_body TEXT,
+  subject TEXT,                             -- the draft as it stands, a reviewer's edits included
   body TEXT,
-  sent_subject TEXT,                        -- exactly what went out, so edits can be counted
+  sent_subject TEXT,                        -- exactly what went out, signature and opt-out included
   sent_body TEXT,
   sources TEXT NOT NULL DEFAULT '[]',       -- JSON [{title, url, note}]: what the writer checked
   rationale TEXT,                           -- why this draft, and what was left out
   written_by TEXT,                          -- 'agent' | 'ai' | 'person'
   review_note TEXT,                         -- why a person sent it back
+  attempts INTEGER NOT NULL DEFAULT 0,      -- failed AI drafts; it stops trying after a few
   message_id TEXT,                          -- the Gmail message, once sent
   error TEXT,
   approved_by TEXT,
   approved_at TEXT,
+  sending_at TEXT,                          -- handed to Gmail; a run that dies here is checked before anything is sent again
   sent_at TEXT,
+  done_by TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- What came back on a campaign's threads: replies, automatic answers and bounces.
+CREATE TABLE IF NOT EXISTS inbound (
+  message_id TEXT PRIMARY KEY,              -- the Gmail message
+  thread_id TEXT NOT NULL,
+  enrollment_id TEXT REFERENCES enrollments(id) ON DELETE CASCADE,
+  person_id TEXT REFERENCES people(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,                       -- 'reply' | 'auto' (out of office and other automatic answers) | 'bounce'
+  intent TEXT,                              -- a reply as the AI read it: 'interested' | 'not_interested' | 'unsubscribe' | 'out_of_office' | 'other'; null until read
+  summary TEXT,                             -- one line: what they said
+  excerpt TEXT NOT NULL DEFAULT '',         -- the start of what they wrote, the quoted thread cut off
+  from_email TEXT NOT NULL DEFAULT '',
+  received_at TEXT NOT NULL,
+  read_attempts INTEGER NOT NULL DEFAULT 0,
+  handled_at TEXT,                          -- a person has dealt with it
+  handled_by TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_steps_campaign ON steps(campaign_id, position);
 CREATE INDEX IF NOT EXISTS idx_enrollments_campaign ON enrollments(campaign_id, status);
 CREATE INDEX IF NOT EXISTS idx_enrollments_person ON enrollments(person_id);
 CREATE INDEX IF NOT EXISTS idx_enrollments_due ON enrollments(status, due_at);
+CREATE INDEX IF NOT EXISTS idx_enrollments_thread ON enrollments(thread_id);
 CREATE INDEX IF NOT EXISTS idx_touches_enrollment ON touches(enrollment_id, position);
 CREATE INDEX IF NOT EXISTS idx_touches_status ON touches(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_touches_sent ON touches(sent_at);
 CREATE INDEX IF NOT EXISTS idx_people_domain ON people(domain);
+CREATE INDEX IF NOT EXISTS idx_inbound_open ON inbound(handled_at, received_at);
+CREATE INDEX IF NOT EXISTS idx_inbound_enrollment ON inbound(enrollment_id);
