@@ -58,7 +58,7 @@ export function PeoplePage({ navigate }: { navigate: Navigate }) {
           title={filtered ? "No one matches." : "No people yet."}
           action={!filtered ? <Button size="sm" onClick={() => setDialog("add")}><Plus /> Add person</Button> : undefined}
         />
-      ) : (
+      ) : list.data && (
         <div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-6">
           <div className="overflow-hidden rounded-md shadow-edge">
             <Table grid>

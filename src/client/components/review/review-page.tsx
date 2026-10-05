@@ -98,7 +98,7 @@ export function ReviewPage({ tab, touchId, navigate }: { tab: ReviewTab; touchId
           </Notice>
         )}
         {sending?.last_error && <Notice>The last check stopped: {sending.last_error}</Notice>}
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           <Tabs value={tab} onValueChange={(v) => navigate(withQuery({ tab: v === "review" ? null : v, touch: null }))}>
             <TabsList>
               {tabs.map((t) => (

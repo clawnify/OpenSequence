@@ -253,7 +253,7 @@ function CampaignPeople({ campaign, navigate, onChanged }: { campaign: Campaign;
       <Picker label="Show" className="w-48" value={status} options={STATUS_FILTER} onChange={(v) => { setStatus(v as "" | EnrollmentStatus); setPage(1); }} />
       {list.data && rows.length === 0 ? (
         <EmptyState title={status ? "No one here." : "No one in this campaign yet."} />
-      ) : (
+      ) : list.data && (
         <div className="overflow-hidden rounded-md shadow-edge">
           <Table grid>
             <TableHeader>

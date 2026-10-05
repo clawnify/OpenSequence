@@ -44,7 +44,7 @@ export function RepliesPage({ show, navigate }: { show: "open" | "all"; navigate
       </PageHeader>
       {list.data && list.data.replies.length === 0 ? (
         <EmptyState title={show === "open" ? "No replies waiting." : "Nothing has come back yet."} />
-      ) : (
+      ) : list.data && (
         <div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-6">
           <ul className="mx-auto flex max-w-3xl flex-col rounded-md bg-card shadow-edge">
             {(list.data?.replies ?? []).map((r) => (

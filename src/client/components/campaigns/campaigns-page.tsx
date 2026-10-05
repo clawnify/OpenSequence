@@ -28,7 +28,7 @@ export function CampaignsPage({ navigate }: { navigate: Navigate }) {
       </PageHeader>
       {list.data && campaigns.length === 0 ? (
         <EmptyState title="No campaigns yet." action={<Button size="sm" onClick={() => setCreating(true)}><Plus /> New campaign</Button>} />
-      ) : (
+      ) : list.data && (
         <div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-6">
           <div className="overflow-hidden rounded-md shadow-edge">
             <Table grid>

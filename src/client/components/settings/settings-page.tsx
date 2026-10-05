@@ -134,7 +134,7 @@ export function SettingsPage() {
               {v.sending.mailbox
                 ? `Today ${v.sending.sent_today} of ${v.sending.cap_today} sent; the next one can go ${due(v.sending.next_send_at)}. `
                 : "Nothing goes out until a mailbox is picked. "}
-              Replies and booked meetings were last checked {ago(v.sending.last_run_at)}.
+              {v.sending.last_run_at ? `Replies and booked meetings were last checked ${ago(v.sending.last_run_at)}.` : "Replies and booked meetings haven't been checked yet."}
             </p>
             {v.sending.last_error && <Notice>The last check stopped: {v.sending.last_error}</Notice>}
           </Section>
