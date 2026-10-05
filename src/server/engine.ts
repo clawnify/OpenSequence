@@ -23,7 +23,7 @@ import {
 } from "./integrations.js";
 import {
   DAY_MS, MINUTE_MS, PREPARE_AHEAD_MS, addressOf, addressesIn, bookedWith, coerceDraft, coerceReading, companyDomain,
-  composeBody, dailyCap, dayStart, draftPrompt, emailDomain, inboundKind, isInbound, localDay, nextSendAt,
+  composeBody, dailyCap, dayStart, draftPrompt, emailDomain, inboundKind, isInbound, localDay, nextSendAt, normaliseEmail,
   ownWords, prepareBudget, readingPrompt, type GmailMessage, type Window,
 } from "./sequence-rules.js";
 import {
@@ -334,18 +334,22 @@ async function checkCalendar(ctx: Ctx, force: boolean): Promise<void> {
   const from = new Date(ctx.now.getTime() - DAY_MS).toISOString();
   const to = new Date(ctx.now.getTime() + CALENDAR_AHEAD_MS).toISOString();
   const guests = new Map<string, string>(); // address → when
+  // Our own domains: the sending mailbox's, and the calendar owner's (the
+  // attendee marked as us). A colleague in an internal meeting is not a
+  // company booking one.
+  const own = new Set<string>(ctx.s.mailbox ? [emailDomain(ctx.s.mailbox)] : []);
   let page: string | null = null;
   for (let i = 0; i < 3; i++) {
     const res = await calendarPage(cal, from, to, page);
     for (const ev of res.items) {
       const when = ev.start?.dateTime ?? ev.start?.date ?? "";
       for (const g of bookedWith(ev)) if (!guests.has(g)) guests.set(g, when);
+      for (const a of ev.attendees ?? []) if (a.self && a.email) own.add(emailDomain(normaliseEmail(a.email)));
     }
     page = res.next;
     if (!page || Date.now() > ctx.deadline) break;
   }
   if (!guests.size) return;
-  const ownDomain = ctx.s.mailbox ? emailDomain(ctx.s.mailbox) : "";
   const matched = new Set<string>();
   for (const chunk of parts([...guests.keys()])) {
     const rows = await query<Enrollment & { email: string }>(
@@ -378,7 +382,7 @@ async function checkCalendar(ctx: Ctx, force: boolean): Promise<void> {
   for (const [guest, when] of guests) {
     if (matched.has(guest)) continue;
     const domain = companyDomain(guest, isPersonal);
-    if (!domain || domain === ownDomain) continue;
+    if (!domain || own.has(domain)) continue;
     await stopCompany(domain, null, `${guest} booked a meeting${when ? ` for ${when.slice(0, 10)}` : ""}`);
   }
 }
