@@ -119,7 +119,7 @@ export function AddPeopleDialog({ open, onOpenChange, campaign, onDone }: { open
             ) : (
               <label className="flex flex-col gap-1.5 text-sm font-medium">
                 Email addresses
-                <Textarea rows={6} value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder={"ada@example.com\njan@bouwbedrijf.nl"} />
+                <Textarea rows={6} value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder={"ada@example.com\njan@example.org"} />
                 <span className="text-[0.8125rem] font-normal text-muted-foreground">One per line, up to 500. New ones are added to People; add their name and notes there, so drafts can use them.</span>
               </label>
             )}
