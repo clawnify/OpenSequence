@@ -1360,7 +1360,10 @@ const listSignaturesRoute = createRoute({
 
 app.openapi(listSignaturesRoute, async (c) => {
   const { page, limit, offset } = pageParams(c.req.valid("query"));
-  const [all, s] = await Promise.all([listSignatures(), getSettings()]);
+  // Settings first: on an install from before named signatures, reading them
+  // moves its one signature into the list.
+  const s = await getSettings();
+  const all = await listSignatures();
   return c.json({
     signatures: all.slice(offset, offset + limit).map((x) => ({ id: x.id, name: x.name, body: x.body })),
     total: all.length, page, limit,
