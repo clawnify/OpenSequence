@@ -139,13 +139,14 @@ const TouchSchema = z.object({
 const ReplySchema = z.object({
   id: z.string(),
   kind: z.enum(["reply", "auto", "bounce"]),
-  intent: z.string().nullable().openapi({ description: "interested | not_interested | unsubscribe | out_of_office | other, as the AI read it; null until read" }),
+  intent: z.string().nullable().openapi({ description: "interested | not_interested | unsubscribe | out_of_office | other, as the AI read it; null until read. unsubscribe has already marked the person as never to be emailed" }),
+  maybe_opt_out: z.boolean().openapi({ description: "Might be asking us to stop, but not clearly (a bare yes or no): a person decides, with POST /api/people/{id}/unsubscribe" }),
   summary: z.string().nullable(),
   excerpt: z.string(),
   from_email: z.string(),
   received_at: z.string(),
   handled_at: z.string().nullable(),
-  person: z.object({ id: z.string(), email: z.string(), name: z.string(), company: z.string() }).nullable(),
+  person: z.object({ id: z.string(), email: z.string(), name: z.string(), company: z.string(), unsubscribed: z.boolean() }).nullable(),
   campaign: z.object({ id: z.string(), name: z.string() }).nullable(),
   enrollment: z.object({ id: z.string(), status: z.string(), reason: z.string().nullable() }).nullable(),
 }).openapi("Reply");
@@ -1143,17 +1144,20 @@ app.openapi(listReplies, async (c) => {
   const total = (await get<{ n: number }>(`SELECT COUNT(*) AS n ${from}${w}`, params))?.n ?? 0;
   const rows = await query<{
     message_id: string; kind: "reply" | "auto" | "bounce"; intent: string | null; summary: string | null; excerpt: string; from_email: string; received_at: string; handled_at: string | null;
-    person_id: string | null; email: string | null; first_name: string | null; last_name: string | null; company: string | null;
+    maybe_opt_out: number; person_id: string | null; email: string | null; first_name: string | null; last_name: string | null; company: string | null; unsubscribed_at: string | null;
     campaign_id: string | null; campaign_name: string | null; enrollment_id: string | null; e_status: string | null; e_reason: string | null;
   }>(
-    `SELECT i.*, p.email, p.first_name, p.last_name, p.company, c.id AS campaign_id, c.name AS campaign_name, e.status AS e_status, e.reason AS e_reason
+    `SELECT i.*, p.email, p.first_name, p.last_name, p.company, p.unsubscribed_at, c.id AS campaign_id, c.name AS campaign_name, e.status AS e_status, e.reason AS e_reason
      ${from}${w} ORDER BY i.received_at DESC LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
   return c.json({
     replies: rows.map((r) => ({
       id: r.message_id, kind: r.kind, intent: r.intent, summary: r.summary, excerpt: r.excerpt, from_email: r.from_email, received_at: r.received_at, handled_at: r.handled_at,
-      person: r.person_id ? { id: r.person_id, email: r.email ?? "", name: [r.first_name, r.last_name].filter(Boolean).join(" ") || (r.email ?? ""), company: r.company ?? "" } : null,
+      maybe_opt_out: !!r.maybe_opt_out,
+      person: r.person_id ? {
+        id: r.person_id, email: r.email ?? "", name: [r.first_name, r.last_name].filter(Boolean).join(" ") || (r.email ?? ""), company: r.company ?? "", unsubscribed: !!r.unsubscribed_at,
+      } : null,
       campaign: r.campaign_id ? { id: r.campaign_id, name: r.campaign_name ?? "" } : null,
       enrollment: r.enrollment_id ? { id: r.enrollment_id, status: r.e_status ?? "", reason: r.e_reason } : null,
     })),

@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS settings (
   about TEXT NOT NULL DEFAULT '',           -- what we sell, in a sentence: frames every draft
   mailbox TEXT,                             -- the Gmail account emails go out from (its address); nothing is sent until one is picked
   signature TEXT NOT NULL DEFAULT '',       -- added under every email when it is sent
-  opt_out TEXT NOT NULL DEFAULT 'Not for you? Reply "unsubscribe" and I won''t email you again.', -- under the signature on every email, never empty
+  opt_out TEXT NOT NULL DEFAULT 'P.S. If this isn''t for you, just say so and I won''t write again.', -- under the signature on every email, never empty; any wording works, the AI reads the replies
   daily_cap INTEGER NOT NULL DEFAULT 30,    -- emails a day, all campaigns together
   ramp_from TEXT,                           -- YYYY-MM-DD a new mailbox started sending: the daily cap climbs from it
   send_from TEXT NOT NULL DEFAULT '09:00',  -- the sending window, local time
@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS inbound (
   kind TEXT NOT NULL,                       -- 'reply' | 'auto' (out of office and other automatic answers) | 'bounce'
   intent TEXT,                              -- a reply as the AI read it: 'interested' | 'not_interested' | 'unsubscribe' | 'out_of_office' | 'other'; null until read
   summary TEXT,                             -- one line: what they said
+  maybe_opt_out INTEGER NOT NULL DEFAULT 0, -- might be asking us to stop, but not clearly: a person decides
   excerpt TEXT NOT NULL DEFAULT '',         -- the start of what they wrote, the quoted thread cut off
   from_email TEXT NOT NULL DEFAULT '',
   received_at TEXT NOT NULL,

@@ -143,7 +143,7 @@ export function SettingsPage() {
             <TextSetting label="What you sell" rows={3} max={1000} value={s.about} disabled={!can} placeholder="e.g. Site management software for building firms: permits, planning and photos in one place." onSave={(t) => void save({ about: t })} />
             <TextSetting label="Signature" rows={4} max={1000} value={s.signature} disabled={!can} placeholder={"Sam de Vries\nOurCo · ourco.example"} onSave={(t) => void save({ signature: t })} />
             <TextSetting label="Opt-out line" rows={2} max={300} value={s.opt_out} disabled={!can} onSave={(t) => void save({ opt_out: t })}
-              hint="Required. A reply asking to stop marks the person as not to be emailed, for good." />
+              hint="Required, in any words you like: people answer in their own, and the AI reads every reply. Anyone who asks you to stop is never emailed again; a short answer that might mean it is flagged on Replies for you to decide." />
           </Section>
 
           <Section title="CRM" description="Sends, replies and booked meetings are written onto the contact's timeline in the CRM. The CRM reads only the main mailbox, so this is how it sees outreach.">

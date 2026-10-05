@@ -130,7 +130,9 @@ export interface Reply {
   from_email: string;
   received_at: string;
   handled_at: string | null;
-  person: { id: string; email: string; name: string; company: string } | null;
+  /** Might be asking us to stop, but not clearly: a person decides. */
+  maybe_opt_out: boolean;
+  person: { id: string; email: string; name: string; company: string; unsubscribed: boolean } | null;
   campaign: { id: string; name: string } | null;
   enrollment: { id: string; status: EnrollmentStatus; reason: string | null } | null;
 }

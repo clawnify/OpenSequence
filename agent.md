@@ -58,6 +58,9 @@ steps becomes a touch: a draft to approve, an email that went out, a task to do.
 
 - `GET /api/replies` lists replies nobody has dealt with. `intent` and `summary`
   are the app's AI reading; read `excerpt` yourself before suggesting anything.
+- `intent: "unsubscribe"` has already marked the person as never to be emailed.
+  `maybe_opt_out: true` means it might be a request to stop: point it out and
+  leave the call to the person (`POST /api/people/{id}/unsubscribe` is theirs to make).
 - Mark one done (`POST /api/replies/{id}/handled`) only when the person says so.
 
 ## Pages

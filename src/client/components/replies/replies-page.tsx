@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, ExternalLink, Play } from "lucide-react";
+import { Ban, Check, ExternalLink, Play } from "lucide-react";
 import { api } from "@/api";
 import { useApp } from "@/context";
 import { useLoad } from "@/hooks/use-load";
@@ -24,7 +24,11 @@ export function RepliesPage({ show, navigate }: { show: "open" | "all"; navigate
 
   const act = async (r: Reply, path: string) => {
     try {
-      await api("POST", `/api/replies/${encodeURIComponent(r.id)}/${path}`, {});
+      await api("POST", path === "unsubscribe" ? `/api/people/${encodeURIComponent(r.person!.id)}/unsubscribe` : `/api/replies/${encodeURIComponent(r.id)}/${path}`, {});
+      if (path === "unsubscribe") {
+        await Promise.all([refresh(), list.reload()]);
+        return;
+      }
       if (show === "open") list.setData((d) => (d ? { ...d, replies: d.replies.filter((x) => x.id !== r.id), total: Math.max(0, d.total - 1) } : d));
       await Promise.all([refresh(), list.reload()]);
     } catch (e) {
@@ -67,6 +71,7 @@ export function RepliesPage({ show, navigate }: { show: "open" | "all"; navigate
                     <span className="truncate text-sm font-medium">{r.from_email}</span>
                   )}
                   {r.person?.company && <span className="truncate text-[0.8125rem] text-muted-foreground">{r.person.company}</span>}
+                  {r.maybe_opt_out && !r.person?.unsubscribed && <Pill tone="warning" title="A short answer that could be asking you to stop">Might want no more email</Pill>}
                   <span className="ml-auto shrink-0 text-[0.8125rem] text-muted-foreground">{ago(r.received_at)}</span>
                 </div>
                 {r.summary && <p className="text-sm">{r.summary}</p>}
@@ -84,6 +89,9 @@ export function RepliesPage({ show, navigate }: { show: "open" | "all"; navigate
                     </Button>
                     {r.kind === "reply" && r.intent === "out_of_office" && r.enrollment?.status === "replied" && (
                       <Button size="sm" variant="outline" onClick={() => void act(r, "resume")}><Play /> Carry on with the sequence</Button>
+                    )}
+                    {r.kind === "reply" && r.person && !r.person.unsubscribed && r.intent !== "unsubscribe" && (
+                      <Button size="sm" variant={r.maybe_opt_out ? "outline" : "ghost"} onClick={() => void act(r, "unsubscribe")}><Ban /> Don't email again</Button>
                     )}
                     {!r.handled_at && r.kind === "reply" && (
                       <Button size="sm" variant="outline" onClick={() => void act(r, "handled")}><Check /> Done</Button>

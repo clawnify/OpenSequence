@@ -59,7 +59,7 @@ export const CAMPAIGN_STATUS: Record<CampaignStatus, { label: string; tone: Colo
 export const INTENT: Record<Intent, { label: string; tone: ColorToken }> = {
   interested: { label: "Interested", tone: "success" },
   not_interested: { label: "Not interested", tone: "slate" },
-  unsubscribe: { label: "Unsubscribe", tone: "danger" },
+  unsubscribe: { label: "Opted out", tone: "danger" },
   out_of_office: { label: "Out of office", tone: "warning" },
   other: { label: "Other", tone: "info" },
 };

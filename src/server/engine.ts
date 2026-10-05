@@ -23,7 +23,7 @@ import {
 } from "./integrations.js";
 import {
   DAY_MS, MINUTE_MS, PREPARE_AHEAD_MS, addressOf, addressesIn, bookedWith, coerceDraft, coerceReading, companyDomain,
-  composeBody, dailyCap, dayStart, draftPrompt, emailDomain, inboundKind, isInbound, localDay, nextSendAt, normaliseEmail,
+  composeBody, dailyCap, dayStart, draftPrompt, emailDomain, inboundKind, isInbound, localDay, needsOptOutCheck, nextSendAt, normaliseEmail,
   ownWords, prepareBudget, readingPrompt, type GmailMessage, type Window,
 } from "./sequence-rules.js";
 import {
@@ -300,7 +300,11 @@ async function readReplies(ctx: Ctx): Promise<void> {
     }
     let reading;
     try {
-      reading = coerceReading(await complete(ctx.env, readingPrompt(), r.excerpt || "(empty message)", { timeoutMs: 15_000, maxTokens: 200 }));
+      const today = localDay(ctx.now, ctx.s.timezone);
+      reading = coerceReading(
+        await complete(ctx.env, readingPrompt(ctx.s.opt_out, today), r.excerpt || "(empty message)", { timeoutMs: 15_000, maxTokens: 200 }),
+        today,
+      );
     } catch (e) {
       await run("UPDATE inbound SET read_attempts = read_attempts + 1 WHERE message_id = ?", [r.message_id]);
       if (e instanceof ModelError && e.outOfCredits) return;
@@ -310,7 +314,9 @@ async function readReplies(ctx: Ctx): Promise<void> {
       await run("UPDATE inbound SET read_attempts = read_attempts + 1 WHERE message_id = ?", [r.message_id]);
       continue;
     }
-    await run("UPDATE inbound SET intent = ?, summary = ? WHERE message_id = ?", [reading.intent, reading.summary, r.message_id]);
+    await run("UPDATE inbound SET intent = ?, summary = ?, maybe_opt_out = ? WHERE message_id = ?", [
+      reading.intent, reading.summary, needsOptOutCheck(reading, r.excerpt) ? 1 : 0, r.message_id,
+    ]);
     if (reading.intent === "unsubscribe" && r.person_id) await unsubscribe(r.person_id, "Asked not to be emailed");
     if (r.kind === "auto" && reading.return_date && r.enrollment_id) {
       // Back on that day: resume the morning after, so the first thing they read isn't us.

@@ -360,6 +360,20 @@ export function ownWords(text: string | null | undefined, max = 1500): string {
   return out.length > max ? `${out.slice(0, max - 1).trimEnd()}…` : out;
 }
 
+/** How many words someone wrote. A reply of a few words can't say which
+ *  question it answers, the email's or the opt-out line's: a fact, counted. */
+export function wordCount(text: string | null | undefined): number {
+  return (text ?? "").trim().split(/\s+/).filter(Boolean).length;
+}
+
+/** Whether a person should decide if a reply asks us to stop: the AI says it
+ *  might, or the reply is too short to say what it answers. Never for a clear
+ *  opt-out (already applied) or an automatic answer. */
+export function needsOptOutCheck(reading: Reading, excerpt: string): boolean {
+  if (reading.intent === "unsubscribe" || reading.intent === "out_of_office") return false;
+  return reading.maybe_opt_out || wordCount(excerpt) <= 3;
+}
+
 /** Every address mentioned in a message, for a bounce Gmail filed outside the thread. */
 export function addressesIn(text: string | null | undefined): string[] {
   const found = (text ?? "").toLowerCase().match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/g) ?? [];
@@ -375,6 +389,9 @@ export interface Reading {
   intent: Intent;
   summary: string;
   return_date: string | null;
+  /** Might be asking us to stop, but not clearly (a bare "yes" that could
+   *  answer the opt-out line or the email): a person decides. */
+  maybe_opt_out: boolean;
 }
 
 /** The first JSON object in a model's answer. */
@@ -394,26 +411,40 @@ function oneLine(v: unknown, max: number): string {
   return typeof v === "string" ? v.replace(/\s+/g, " ").trim().slice(0, max) : "";
 }
 
-export function coerceReading(raw: string): Reading | null {
+/** A model's reading of a reply, or null when it is unusable. A return date
+ *  must be after `today`: a model unsure of the year answers with a past one. */
+export function coerceReading(raw: string, today?: string): Reading | null {
   const j = jsonIn(raw);
   if (!j) return null;
   const intent = INTENTS.includes(j.intent as Intent) ? (j.intent as Intent) : "other";
   const summary = oneLine(j.summary, 200);
   if (!summary) return null;
-  return { intent, summary, return_date: isDay(j.return_date) ? j.return_date : null };
+  const back = isDay(j.return_date) && (!today || j.return_date > today) ? j.return_date : null;
+  return { intent, summary, return_date: back, maybe_opt_out: intent !== "unsubscribe" && j.maybe_opt_out === true };
 }
 
-export function readingPrompt(): string {
+/**
+ * How the AI reads a reply. An opt-out is recognised in any words or language,
+ * so the opt-out line in our emails can be as human as we like: it is handed
+ * over, because a short reply ("yes please", "no") may be answering it.
+ */
+export function readingPrompt(optOut = "", today = ""): string {
+  const line = optOut.replace(/\s+/g, " ").trim();
   return [
     "You read one email someone sent back to a sales email. Answer only with JSON:",
     '{"intent": "interested" | "not_interested" | "unsubscribe" | "out_of_office" | "other",',
     ' "summary": "one short line saying what they wrote, in English",',
-    ' "return_date": "YYYY-MM-DD" or null}',
+    ' "return_date": "YYYY-MM-DD" or null,',
+    ' "maybe_opt_out": true or false}',
+    "unsubscribe: they don't want to hear from us again, in any words or language: remove me, stop, take me off your list, don't contact me, no more emails, or a short answer to our opt-out line asking us to stop.",
+    "not_interested: declines but leaves the door open: not now, maybe later, we already have a provider, ask me next year.",
+    "When a reply could be either of those two, and it sounds final or annoyed, it is unsubscribe.",
     "interested: wants to talk, asks for a call, a demo, prices or more information.",
-    "not_interested: declines, has a provider already, says not now.",
-    "unsubscribe: asks not to be emailed again, to be removed, or to stop.",
     "out_of_office: an automatic away message. return_date is the day they are back, when it says.",
     "other: anything else, such as pointing to a colleague or asking who you are.",
+    "maybe_opt_out: true when the reply might be asking us to stop but it isn't clear. Any reply of a few words that says yes, no, sure or no thanks without saying to what is one: it could answer the opt-out line as much as the email. A person decides those. False when the intent is unsubscribe.",
+    ...(line ? [`Every email we send ends with this opt-out line, which a short reply may be answering: "${line}"`] : []),
+    ...(today ? [`Today is ${today}. A date given without a year is the next one after today.`] : []),
     "Read only what they wrote, not the quoted email below it.",
   ].join("\n");
 }
