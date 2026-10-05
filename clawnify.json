@@ -1,0 +1,46 @@
+{
+  "$schema": "https://app.clawnify.com/schema/v1/clawnify.json",
+  "version": 1,
+  "name": "OpenSequence",
+  "description": "Email sequences a person approves before they send: a researched first email, follow-ups in the same thread, and replies, bounces and booked meetings that stop the sequence. Best for outbound campaigns, cold email follow-ups and sales cadences, sent from a separate mailbox.",
+  "icon": "icon.svg",
+  "tags": ["outreach", "sales", "email", "sequences"],
+
+  "app": {
+    "framework": "react+hono",
+    "database": true,
+    "storage": false,
+    "credentials": ["gmail", "googlecalendar"]
+  },
+
+  "env": {
+    "optional": ["CRM_APP_ID"]
+  },
+
+  "api": {
+    "public_routes": [
+      { "path": "/api/run", "methods": ["POST"] }
+    ]
+  },
+
+  "deploy": {
+    "title": "Deploy your email sequences",
+    "subtitle": "Researched outreach that a person approves before anything is sent",
+    "prompts": [
+      {
+        "key": "what_you_sell",
+        "label": "What do you sell, in a sentence?",
+        "placeholder": "e.g. Site management software for building firms",
+        "required": true
+      },
+      {
+        "key": "first_campaign",
+        "label": "Who should the first campaign write to, and why would they care?",
+        "type": "textarea",
+        "placeholder": "e.g. Owners of building firms with 10 to 50 people who lose days chasing permits"
+      }
+    ]
+  },
+
+  "agent": "agent.md"
+}

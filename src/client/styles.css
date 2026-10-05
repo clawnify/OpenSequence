@@ -237,7 +237,7 @@
     font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     -webkit-font-smoothing: antialiased;
   }
-  /* Numbers read as instrumentation — tabular figures where they matter. */
+  /* Numbers read as instrumentation: tabular figures where they matter. */
   .tabular { font-variant-numeric: tabular-nums; }
 }
 
@@ -276,7 +276,7 @@
    DOM beats a same-specificity rule from the bundle, so these are written
    at `aside.cn-nav …` specificity.
 
-   That specificity is also the trap — see the min-width block below: anything
+   That specificity is also the trap (see the min-width block below): anything
    setting the rail's GEOMETRY must live there, or it also applies to the
    horizontal strip the SDK draws on a phone. Only paint and type are global.
 
@@ -326,7 +326,7 @@ aside.cn-nav .cn-nav-item[data-active] .cn-nav-count { color: var(--muted-foregr
 .dark aside.cn-nav .cn-nav-item:hover { background: rgba(255, 255, 255, 0.04); }
 .dark aside.cn-nav .cn-nav-item[data-active] { background: rgba(255, 255, 255, 0.06); }
 
-/* Rail geometry — only where the SDK actually draws a rail. Below 768px it
+/* Rail geometry, only where the SDK actually draws a rail. Below 768px it
    lays the same markup out as a horizontally scrolling strip, and must be left
    to: our `aside.cn-nav` (0,1,1) outranks its `.cn-nav` (0,1,0) at every width,
    and specificity is resolved before source order, so an unguarded width here
