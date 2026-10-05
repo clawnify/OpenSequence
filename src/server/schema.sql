@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS settings (
   last_error TEXT,
   last_sent_at TEXT,                        -- sends are spaced out across the window from here
   inbox_checked_at TEXT,                    -- received mail is read from here on the next run
+  inbox_cursor TEXT,                        -- JSON {after, page, started}: a read of received mail that didn't finish in one run
   calendar_checked_at TEXT,                 -- when booked meetings were last looked for
   updated_at TEXT DEFAULT (datetime('now'))
 );
@@ -81,6 +82,7 @@ CREATE TABLE IF NOT EXISTS enrollments (
   step INTEGER NOT NULL DEFAULT 1,          -- the next step to do
   due_at TEXT,                              -- when that step is due
   thread_id TEXT,                           -- the Gmail thread, once the first email is out
+  mailbox TEXT,                             -- the mailbox that thread lives in: follow-ups go out from it only
   last_sent_at TEXT,
   paused_until TEXT,                        -- an out-of-office reply: resumes after it
   reason TEXT,                              -- why it stopped or paused, in words
