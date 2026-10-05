@@ -80,6 +80,14 @@ export function SettingsPage() {
     { value: "", label: "None" },
     ...v.crm_apps.map((a) => ({ value: a.id, label: a.name })),
   ];
+  const agentOptions = [
+    { value: "", label: "None" },
+    ...v.agents.map((a) => ({ value: a.id, label: `${a.name}${agentState(a.status)}` })),
+    // The one picked, if it is no longer in the workspace.
+    ...(s.research_agent_id && !v.agents.some((a) => a.id === s.research_agent_id)
+      ? [{ value: s.research_agent_id, label: `${s.research_agent_name ?? "Agent"} (no longer in this workspace)` }]
+      : []),
+  ];
 
   return (
     <>
@@ -148,6 +156,16 @@ export function SettingsPage() {
               hint="Required, in any words you like: people answer in their own, and the AI reads every reply. Anyone who asks you to stop is never emailed again; a short answer that might mean it is flagged on Replies for you to decide." />
           </Section>
 
+          <Section title="Research" description="Steps set to “The agent researches first” are handed to this agent, up to 10 people at a time. It looks into each person and their company, and its drafts land in To approve. A sleeping agent is woken for it, and its runs use the workspace's credits.">
+            <Rows label="Research">
+              <Row title="Research agent" hint={v.agents_error ? `The workspace's agents can't be listed: ${v.agents_error}` : v.agents.length ? undefined : "No agents in this workspace yet."}>
+                <Picker label="Research agent" className="w-56" disabled={!can || (v.agents.length === 0 && !s.research_agent_id)} value={s.research_agent_id ?? ""} options={agentOptions}
+                  onChange={(id) => void save({ research_agent_id: id || null })} />
+              </Row>
+            </Rows>
+            {s.research_error && <Notice>{s.research_error}</Notice>}
+          </Section>
+
           <SignaturesSection view={v} disabled={!can} onSaveDefaults={(patch) => save(patch)} onChanged={() => view.reload()} />
 
           <Section title="CRM" description="Sends, replies and booked meetings are written onto the contact's timeline in the CRM. The CRM reads only the main mailbox, so this is how it sees outreach.">
@@ -163,6 +181,14 @@ export function SettingsPage() {
       </div>
     </>
   );
+}
+
+/** How an agent's state reads next to its name: nothing when it can take work. */
+function agentState(status: string): string {
+  if (status === "ready" || status === "active") return "";
+  if (status === "sleeping" || status === "dreaming") return " (asleep)";
+  if (status === "error") return " (unavailable)";
+  return " (starting)";
 }
 
 /**

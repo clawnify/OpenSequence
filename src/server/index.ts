@@ -14,7 +14,7 @@ import {
   type Step, type Touch,
 } from "./store.js";
 import { crmAppOf, ensureScheduled, runAndBook, scheduleRun, windowOf, type EngineEnv } from "./engine.js";
-import { connectionStatus, contactApps, crmContactsPage, gmailSignature, mailFor, mailboxes } from "./integrations.js";
+import { connectionStatus, contactApps, crmContactsPage, gmailSignature, mailFor, mailboxes, workspaceAgents } from "./integrations.js";
 
 // In production Clawnify injects the CREDENTIALS broker binding, CLAWNIFY_ORG_ID
 // and the org token (CLAWNIFY_TOKEN: the platform queue, the model endpoint and
@@ -242,6 +242,7 @@ function touchView(r: TouchRow) {
     rationale: r.rationale, sources: sourcesOf(r.sources), written_by: r.written_by, review_note: r.review_note, error: r.error,
     instructions: r.instructions ?? "", writer: (r.writer ?? "thread") as "research" | "thread",
     due_at: r.due_at, sent_at: r.sent_at, starts_thread: startsThread,
+    research: r.status === "research" ? { agent_id: r.research_agent_id, sent_at: r.research_sent_at, tries: r.research_tries } : null,
     person: { id: r.person_id, email: r.email, first_name: r.first_name, last_name: r.last_name, title: r.title, company: r.company, linkedin_url: r.linkedin_url, phone: r.phone, notes: r.person_notes },
     campaign: { id: r.campaign_id, name: r.campaign_name },
     enrollment: { id: r.enrollment_id, status: r.e_status, reason: r.e_reason },
@@ -298,6 +299,10 @@ app.get("/api/overview", async (c) => {
       crm: !!crmAppOf(c.env, s),
       can_approve: isPerson(c),
       footer: { opt_out: s.opt_out },
+      research: {
+        agent: s.research_agent_id ? { id: s.research_agent_id, name: s.research_agent_name ?? "The research agent" } : null,
+        error: s.research_error,
+      },
     }, 200);
   } catch (err) {
     return fail(c, err);
@@ -1095,10 +1100,11 @@ app.post("/api/touches/:id/send-back", async (c) => {
     if (note && typeof note === "object") return c.json(note, 400);
     const status = t.writer === "research" ? "research" : "drafting";
     await run(
-      "UPDATE touches SET status = ?, review_note = ?, attempts = 0, error = NULL, approved_by = NULL, approved_at = NULL, updated_at = datetime('now') WHERE id = ?",
+      `UPDATE touches SET status = ?, review_note = ?, attempts = 0, error = NULL, approved_by = NULL, approved_at = NULL,
+         research_sent_at = NULL, research_agent_id = NULL, research_tries = 0, research_task_id = NULL, updated_at = datetime('now') WHERE id = ?`,
       [status, note, id],
     );
-    if (status === "drafting") await kick(c);
+    await kick(c);
     return c.json({ touch: touchView((await touchById(id))!) }, 200);
   } catch (err) {
     return fail(c, err);
@@ -1218,10 +1224,11 @@ app.post("/api/replies/:id/resume", async (c) => {
 
 async function settingsView(c: C) {
   const s = await getSettings();
-  const [boxes, status, apps] = await Promise.all([
+  const [boxes, status, apps, agents] = await Promise.all([
     mailboxes(c.env).catch(() => []),
     connectionStatus(c.env),
     contactApps(c.env, originOf(c)),
+    workspaceAgents(c.env).then((list) => ({ list, error: null }), (e: Error) => ({ list: [], error: e.message })),
   ]);
   return {
     settings: {
@@ -1229,7 +1236,10 @@ async function settingsView(c: C) {
       opt_out: s.opt_out, daily_cap: s.daily_cap, ramp_from: s.ramp_from,
       send_from: s.send_from, send_until: s.send_until, timezone: s.timezone, weekdays_only: !!s.weekdays_only,
       crm_app_id: s.crm_app_id, crm_in_use: crmAppOf(c.env, s),
+      research_agent_id: s.research_agent_id, research_agent_name: s.research_agent_name, research_error: s.research_error,
     },
+    agents: agents.list,
+    agents_error: agents.error,
     mailboxes: boxes,
     signatures: (await listSignatures()).map((x) => ({ id: x.id, name: x.name, body: x.body })),
     connections: status,
@@ -1309,11 +1319,29 @@ app.put("/api/settings", async (c) => {
       }
       patch.crm_app_id = b.crm_app_id as string | null;
     }
+    if (b.research_agent_id !== undefined) {
+      if (b.research_agent_id === null || b.research_agent_id === "") {
+        patch.research_agent_id = null;
+        patch.research_agent_name = null;
+      } else {
+        if (typeof b.research_agent_id !== "string") return c.json({ error: "research_agent_id is an agent's id, or null for none" }, 400);
+        const agents = await workspaceAgents(c.env).catch(() => null);
+        if (!agents) return c.json({ error: "The workspace's agents can't be listed right now: try again in a moment" }, 503);
+        const agent = agents.find((a) => a.id === b.research_agent_id);
+        if (!agent) return c.json({ error: "That isn't an agent in this workspace" }, 400);
+        patch.research_agent_id = agent.id;
+        patch.research_agent_name = agent.name;
+      }
+    }
     const before = await getSettings();
     const from = minutesOf(patch.send_from ?? before.send_from)!;
     const until = minutesOf(patch.send_until ?? before.send_until)!;
     if (until - from < 30) return c.json({ error: "The sending window is at least 30 minutes, and ends after it starts" }, 400);
     await saveSettings(patch);
+    if (patch.research_agent_id !== undefined && patch.research_agent_id !== before.research_agent_id) {
+      await run("UPDATE settings SET research_error = NULL WHERE id = 1");
+      if (patch.research_agent_id) await kick(c);
+    }
     if (patch.mailbox && patch.mailbox !== before.mailbox) await kick(c);
     return c.json(await settingsView(c), 200);
   } catch (err) {

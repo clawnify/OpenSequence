@@ -22,6 +22,10 @@ steps becomes a touch: a draft to approve, an email that went out, a task to do.
 
 ## The research queue (your main job)
 
+When a person picks you as the research agent in Settings, the app hands you
+this work itself: a task with up to 10 touch ids and these same steps. Without
+a pick, work the queue when you are asked to:
+
 1. `GET /api/touches?status=research` lists drafts waiting for research (paged).
 2. For each one, `GET /api/touches/{id}`: the person, the step's instructions
    and the thread so far. Read the campaign's angle with
@@ -75,7 +79,8 @@ steps becomes a touch: a draft to approve, an email that went out, a task to do.
 
 ## Reading failures
 
-- 403 on approve, settings or signatures: those are a person's, by design.
+- 403 on approve, settings or signatures: those are a person's, by design
+  (picking the research agent is a setting too).
 - 409 on a draft: the touch isn't waiting for one any more (someone wrote it, or
   the person replied and the step was skipped).
 - Nothing is going out: `GET /api/overview` → `sending.last_error` (no mailbox

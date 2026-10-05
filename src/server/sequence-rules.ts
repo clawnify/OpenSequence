@@ -337,6 +337,16 @@ const QUOTE_HEADS = [
   /^_{8,}\s*$/, // Outlook's rule above "From: … Sent: …"
 ];
 
+/** A long heading wraps onto a second line ("On … <sam@ourco.io>" / "wrote:"),
+ *  as Gmail's plain text does. Joined, it counts only with an address in it,
+ *  which a heading always has: a line of the person's own that happens to
+ *  end in "wrote:" is kept. */
+function wrappedHead(line: string, next: string | undefined): boolean {
+  if (next === undefined) return false;
+  const joined = `${line} ${next.trim()}`;
+  return /<[^<>\s]+@[^<>\s]+>/.test(joined) && QUOTE_HEADS.some((re) => re.test(joined));
+}
+
 /** What the person wrote in this message: the quoted thread below it cut off,
  *  HTML turned into text, at most `max` characters. */
 export function ownWords(text: string | null | undefined, max = 1500): string {
@@ -349,10 +359,10 @@ export function ownWords(text: string | null | undefined, max = 1500): string {
   }
   const lines = t.replace(/\r\n?/g, "\n").split("\n");
   const kept: string[] = [];
-  for (const line of lines) {
+  for (const [i, line] of lines.entries()) {
     const s = line.trim();
     if (s.startsWith(">")) break;
-    if (QUOTE_HEADS.some((re) => re.test(s))) break;
+    if (QUOTE_HEADS.some((re) => re.test(s)) || wrappedHead(s, lines[i + 1])) break;
     if (/^From: /.test(s) && kept.length > 0) break;
     kept.push(line.replace(/\s+$/, ""));
   }
@@ -604,4 +614,48 @@ export function bookedWith(e: CalendarEvent): string[] {
     .filter((a) => !a.self && !a.resource && a.responseStatus !== "declined")
     .map((a) => normaliseEmail(a.email))
     .filter((a) => a.includes("@"));
+}
+
+// ── Handing research to the agent ──────────────────────────────────
+
+/** People per hand-off: one agent task per batch, not per person, keeps its sessions few. */
+export const RESEARCH_BATCH = 10;
+/** A hand-off still without a draft after this long is made again: the agent's run may have died. */
+export const RESEARCH_RETRY_MS = 3 * 60 * MINUTE_MS;
+/** Hand-offs without a draft before a touch is left to a person. */
+export const RESEARCH_TRIES = 2;
+
+export interface ResearchWaiting {
+  id: string;
+  sent_at: string | null;
+  agent_id: string | null;
+  tries: number;
+}
+
+/**
+ * What to hand to the research agent now, in the order given (oldest first).
+ * Nothing while a batch it was handed is still being worked; else the touches
+ * not handed yet, or handed long enough ago that the run ended without them,
+ * each at most RESEARCH_TRIES times. A batch handed to an agent that is no
+ * longer the pick is left to finish.
+ */
+export function researchBatch(waiting: ResearchWaiting[], agentId: string, now: Date): string[] {
+  const working = (t: ResearchWaiting) => t.sent_at !== null && now.getTime() - Date.parse(t.sent_at) < RESEARCH_RETRY_MS;
+  if (waiting.some((t) => t.agent_id === agentId && working(t))) return [];
+  return waiting.filter((t) => !working(t) && t.tries < RESEARCH_TRIES).slice(0, RESEARCH_BATCH).map((t) => t.id);
+}
+
+/** What the research agent is asked to do. The touch ids travel in the payload. */
+export function researchInstruction(app: { id: string | null; url: string | null }, count: number): string {
+  const via = app.id
+    ? `call_app_api with app_id "${app.id}"`
+    : `call_app_api on the OpenSequence app${app.url ? ` at ${app.url}` : ""}`;
+  return [
+    `OpenSequence has ${count === 1 ? "an email" : `${count} emails`} waiting for your research; a person approves each one before it is sent. The payload lists the touch ids. For each one, through ${via}:`,
+    "1. GET /api/touches/{id}: the person, the campaign, the step's instructions and the thread so far. A review_note means a person sent your earlier draft back: do what it says. Read the campaign's angle with GET /api/campaigns/{campaign.id}.",
+    "2. Research the person and their company: their website, recent news, job posts, their LinkedIn profile. Find one or two specific facts you can link to that connect to the angle. Leave out anything you can't source.",
+    "3. Write the email: plain text, under 120 words, greeting them by first name. No signature and no opt-out line (both are added when it goes out), and never a placeholder. When starts_thread is true it needs a short subject.",
+    '4. Hand it in: PUT /api/touches/{id}/draft { "subject", "body", "rationale": "why this angle, what you left out", "sources": [{ "title", "url", "note" }] }. A 409 means it no longer needs you: move on.',
+    "If you find nothing worth writing about someone, hand in nothing for them and say why in your summary. Never approve or send anything.",
+  ].join("\n");
 }

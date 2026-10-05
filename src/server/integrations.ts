@@ -5,6 +5,7 @@
 // org token. Action slugs and argument shapes were run against the live
 // Composio catalogue on 2026-10-05.
 
+import { createAgents } from "@clawnify/agents";
 import { accounts, connect, describe, type ConnectionsEnv } from "@clawnify/connections";
 import type { CalendarEvent, GmailMessage } from "./sequence-rules.js";
 import { normaliseEmail } from "./sequence-rules.js";
@@ -201,18 +202,59 @@ export interface SiblingApp {
   provides: string[];
 }
 
-/** The org's live apps that hold contacts, this one left out. Empty when the
- *  platform can't be reached: the app then simply works on its own. */
-export async function contactApps(env: PlatformEnv, selfOrigin: string): Promise<SiblingApp[]> {
+/** The org's live apps, this one included. Empty when the platform can't be
+ *  reached: the app then simply works on its own. */
+async function directory(env: PlatformEnv): Promise<SiblingApp[]> {
   if (!env.CLAWNIFY_TOKEN) return [];
   try {
     const res = await fetch(`${platformBase(env)}/v1/apps/directory`, { headers: { Authorization: `Bearer ${env.CLAWNIFY_TOKEN}` } });
     if (!res.ok) return [];
     const data = (await res.json()) as { apps?: SiblingApp[] };
-    return (data.apps ?? []).filter((a) => a.url !== selfOrigin && Array.isArray(a.provides) && a.provides.includes("contacts"));
+    return data.apps ?? [];
   } catch {
     return [];
   }
+}
+
+/** The org's live apps that hold contacts, this one left out. */
+export async function contactApps(env: PlatformEnv, selfOrigin: string): Promise<SiblingApp[]> {
+  return (await directory(env)).filter((a) => a.url !== selfOrigin && Array.isArray(a.provides) && a.provides.includes("contacts"));
+}
+
+/** This app's own id, found in the directory by its address: an agent calls the app by it. */
+export async function selfAppId(env: PlatformEnv, origin: string): Promise<string | null> {
+  return (await directory(env)).find((a) => a.url === origin)?.id ?? null;
+}
+
+// ── The workspace's agents ─────────────────────────────────────────
+
+/** An agent in the workspace, as the platform lists it (one per server). */
+export interface Agent {
+  id: string;
+  name: string;
+  status: string;
+}
+
+function agentsApi(env: PlatformEnv) {
+  return createAgents({ CLAWNIFY_TOKEN: env.CLAWNIFY_TOKEN, CLAWNIFY_API_URL: env.CLAWNIFY_API_URL ? platformBase(env) : undefined });
+}
+
+/** Every agent in the workspace, a page of 100 at a time. */
+export async function workspaceAgents(env: PlatformEnv): Promise<Agent[]> {
+  const out: Agent[] = [];
+  for (let offset = 0; offset < 1000; offset += 100) {
+    const r = await agentsApi(env).list({ limit: 100, offset });
+    for (const a of r.servers) if (a.status !== "deleting") out.push({ id: a.id, name: a.name?.trim() || "Agent", status: a.status ?? "" });
+    if (!r.page.has_more) break;
+  }
+  return out;
+}
+
+/** Hands work to an agent; a sleeping one is woken for it. Returns the platform's
+ *  id for the hand-off. Throws ClawnifyAgentsError, with `outcomeUnknown` when
+ *  it may have gone through anyway. */
+export async function handToAgent(env: PlatformEnv, agentId: string, instruction: string, payload: unknown, key: string): Promise<string> {
+  return (await agentsApi(env).dispatch({ instruction, server_id: agentId, payload, idempotency_key: key })).task_id;
 }
 
 async function crmFetch<T>(env: PlatformEnv, appId: string, method: string, path: string, body?: unknown): Promise<T> {

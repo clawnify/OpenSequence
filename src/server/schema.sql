@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS settings (
   weekdays_only INTEGER NOT NULL DEFAULT 1,
   crm_app_id TEXT,                          -- a sibling CRM app that sends, replies and meetings are written to
   crm_error TEXT,                           -- the last write to it that failed
+  research_agent_id TEXT,                   -- the agent research-first steps are handed to; null: none, they wait
+  research_agent_name TEXT,                 -- its name when it was picked, for the screens
+  research_error TEXT,                      -- why the last hand-off was refused
   running_until TEXT,                       -- a run's lease; a second run waits it out
   job_id TEXT,                              -- the next run booked on the platform queue
   next_run_at TEXT,
@@ -124,6 +127,10 @@ CREATE TABLE IF NOT EXISTS touches (
   written_by TEXT,                          -- 'agent' | 'ai' | 'person'
   review_note TEXT,                         -- why a person sent it back
   attempts INTEGER NOT NULL DEFAULT 0,      -- failed AI drafts; it stops trying after a few
+  research_sent_at TEXT,                    -- handed to the research agent; handed again if no draft comes in a few hours
+  research_agent_id TEXT,                   -- the agent it was handed to
+  research_tries INTEGER NOT NULL DEFAULT 0, -- hand-offs without a draft; after two it is left to a person
+  research_task_id TEXT,                    -- the platform's id for the hand-off
   message_id TEXT,                          -- the Gmail message, once sent
   error TEXT,
   approved_by TEXT,

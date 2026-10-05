@@ -18,13 +18,13 @@ import { get, query, run } from "./db.js";
 import { bookableAt } from "./jobs.js";
 import { complete, ModelError, type AiEnv } from "./model.js";
 import {
-  calendarPage, calendarRun, crmContactFor, crmNote, mailFor, readMessage, readThread, searchMail, sendNew, sendReply,
-  type Mail, type PlatformEnv,
+  calendarPage, calendarRun, crmContactFor, crmNote, handToAgent, mailFor, readMessage, readThread, searchMail, selfAppId, sendNew,
+  sendReply, type Mail, type PlatformEnv,
 } from "./integrations.js";
 import {
   DAY_MS, MINUTE_MS, PREPARE_AHEAD_MS, addressOf, addressesIn, bookedWith, coerceDraft, coerceReading, companyDomain,
   composeEmail, dailyCap, dayStart, draftPrompt, signatureFor, emailDomain, inboundKind, isInbound, localDay, needsOptOutCheck, nextSendAt, normaliseEmail,
-  ownWords, prepareBudget, readingPrompt, type GmailMessage, type Window,
+  ownWords, prepareBudget, readingPrompt, researchBatch, researchInstruction, type GmailMessage, type ResearchWaiting, type Window,
 } from "./sequence-rules.js";
 import {
   OPEN_TOUCH, advance, endEnrollments, getSettings, isPersonal, parts, personName, signatureBodies, skipOpenTouches, stepsOf, stopAround,
@@ -428,6 +428,55 @@ async function prepare(ctx: Ctx, cap: number): Promise<void> {
   }
 }
 
+/**
+ * Research-first steps go to the agent picked in Settings, a batch at a time
+ * (researchBatch). The agent hands each draft in through the app's API, so
+ * this run only delivers; the touches track the rest. `origin` is this app's
+ * address, which finds its id for the agent.
+ */
+async function handResearch(ctx: Ctx, origin: string | null): Promise<void> {
+  const agentId = ctx.s.research_agent_id;
+  if (!agentId || !ctx.env.CLAWNIFY_TOKEN) return;
+  const waiting = await query<ResearchWaiting>(
+    `SELECT t.id, t.research_sent_at AS sent_at, t.research_agent_id AS agent_id, t.research_tries AS tries
+       FROM touches t
+       JOIN enrollments e ON e.id = t.enrollment_id
+       JOIN campaigns c ON c.id = e.campaign_id AND c.status = 'active'
+      WHERE t.status = 'research' AND e.status = 'active'
+      ORDER BY e.due_at, t.created_at`,
+  );
+  const batch = researchBatch(waiting, agentId, ctx.now);
+  if (!batch.length) return;
+  const at = ctx.now.toISOString();
+  const ids = inList(batch.length);
+  // Marked first: a hand-off whose outcome is unknown counts as made, and is made again later.
+  await run(
+    `UPDATE touches SET research_sent_at = ?, research_agent_id = ?, research_tries = research_tries + 1, research_task_id = NULL WHERE id IN (${ids})`,
+    [at, agentId, ...batch],
+  );
+  try {
+    const app = { id: origin ? await selfAppId(ctx.env, origin) : null, url: origin };
+    const taskId = await handToAgent(ctx.env, agentId, researchInstruction(app, batch.length), { app_id: app.id, touch_ids: batch }, `opensequence-research-${batch[0]}-${at}`);
+    await run(`UPDATE touches SET research_task_id = ? WHERE id IN (${ids})`, [taskId, ...batch]);
+    await run("UPDATE settings SET research_error = NULL WHERE id = 1");
+  } catch (e) {
+    const err = e as Error & { outcomeUnknown?: boolean; code?: string };
+    // Refused (the agent is gone, can't take work, or the workspace is at its
+    // limit): not handed, so the next run tries again. The platform refuses a
+    // not-ready agent with a 503 before handing anything over, which the client
+    // can't tell from a lost answer by its status alone.
+    if (!err.outcomeUnknown || err.code === "agent_server_not_ready") {
+      await run(
+        `UPDATE touches SET research_sent_at = NULL, research_agent_id = NULL, research_tries = research_tries - 1 WHERE id IN (${ids})`,
+        batch,
+      );
+    }
+    const name = ctx.s.research_agent_name ?? "The research agent";
+    const why = err.code === "agent_server_not_ready" ? `${name} can't take work right now (${err.message})` : `${name} couldn't take the research: ${err.message}`;
+    await run("UPDATE settings SET research_error = ? WHERE id = 1", [why.slice(0, 300)]);
+  }
+}
+
 /** The emails already sent to an enrollment, oldest first, as their writer knew them. */
 export async function sentOn(enrollmentId: string): Promise<Array<{ subject: string | null; body: string; sent_at: string }>> {
   return query(
@@ -668,7 +717,7 @@ async function hasWork(now: Date): Promise<boolean> {
   return !!recent?.n;
 }
 
-export async function runOnce(env: EngineEnv, now = new Date(), opts: { force?: boolean } = {}): Promise<RunResult> {
+export async function runOnce(env: EngineEnv, now = new Date(), opts: { force?: boolean; origin?: string } = {}): Promise<RunResult> {
   const result: RunResult = { status: "ran", sent: 0, drafted: 0, replies: 0, meetings: 0, more: false, next: null };
   if (!(await claim(now))) return { ...result, status: "busy" };
   const s = await getSettings();
@@ -692,6 +741,7 @@ export async function runOnce(env: EngineEnv, now = new Date(), opts: { force?: 
     await checkCalendar(ctx, !!opts.force);
     await resumePaused(now);
     await prepare(ctx, cap);
+    await handResearch(ctx, opts.origin ?? null);
     await draftNext(ctx);
     if (Date.now() < ctx.deadline) sendAt = await sendNext(ctx, cap);
     else ctx.more = true;
@@ -769,7 +819,7 @@ export async function ensureScheduled(env: QueueEnv, origin: string, now = new D
 
 /** One run, then the next booked from what it found. */
 export async function runAndBook(env: EngineEnv, origin: string, opts: { force?: boolean } = {}): Promise<RunResult> {
-  const result = await runOnce(env, new Date(), opts);
+  const result = await runOnce(env, new Date(), { ...opts, origin });
   if (result.status !== "busy" && result.next) await scheduleRun(env, origin, new Date(result.next));
   return result;
 }

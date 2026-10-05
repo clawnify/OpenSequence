@@ -36,6 +36,8 @@ export interface Overview {
   can_approve: boolean;
   /** Added under every email when it is sent. */
   footer: { opt_out: string };
+  /** Who research-first steps are handed to, and why the last hand-off was refused. */
+  research: { agent: { id: string; name: string } | null; error: string | null };
 }
 
 export interface Campaign {
@@ -113,6 +115,8 @@ export interface Touch {
   due_at: string | null;
   sent_at: string | null;
   starts_thread: boolean;
+  /** For a touch waiting for research: whom it was handed to, when, and how many times. */
+  research: { agent_id: string | null; sent_at: string | null; tries: number } | null;
   person: PersonRef & { linkedin_url: string; phone: string; notes: string };
   campaign: { id: string; name: string };
   enrollment: { id: string; status: EnrollmentStatus; reason: string | null };
@@ -180,11 +184,17 @@ export interface SettingsView {
     weekdays_only: boolean;
     crm_app_id: string | null;
     crm_in_use: string | null;
+    research_agent_id: string | null;
+    research_agent_name: string | null;
+    research_error: string | null;
   };
   mailboxes: Array<{ address: string; isDefault: boolean }>;
   signatures: Signature[];
   connections: { mail: boolean; calendar: boolean };
   crm_apps: Array<{ id: string; name: string }>;
+  /** The workspace's agents, for the research pick. */
+  agents: Array<{ id: string; name: string; status: string }>;
+  agents_error: string | null;
   sending: Sending;
   live_threads: number;
   can_configure: boolean;

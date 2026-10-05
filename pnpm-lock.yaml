@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@clawnify/agents':
+        specifier: ^0.1.1
+        version: 0.1.1
       '@clawnify/app':
         specifier: ^0.4.4
         version: 0.4.4(@cloudflare/workers-types@4.20260702.1)(@hono/zod-openapi@0.18.4(hono@4.13.13)(zod@3.25.76))(@phosphor-icons/react@2.1.10(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(hono@4.13.13)(react@19.3.0)
@@ -198,6 +201,9 @@ packages:
   '@babel/types@7.29.8':
     resolution: {integrity: sha512-Vj1jF3cPfxg7OAfoI7QnVKLoILlm2JF9pnVHrX8qx7AHMiYWT+NDAA7jChlNgRS4WTLc/fD1lXLmPixluj+3Gg==}
     engines: {node: '>=6.9.0'}
+
+  '@clawnify/agents@0.1.1':
+    resolution: {integrity: sha512-sh1shqCyTksrnCRx3OwwxobeM9kYK1/PbP7ALfsMGD+rbk/ogVhoxT+RZDq5KC2WhE50K9CZfKNJz1CefdTFfg==}
 
   '@clawnify/app@0.4.4':
     resolution: {integrity: sha512-NropQvLeHHqNrk8EzKaMopoZVuvb+F2s1dYx4h6cR+NR+soqbt/iD2XutMh7lNWJtLbz04LIj7L3z7cM/cBm4Q==}
@@ -2209,6 +2215,8 @@ snapshots:
     dependencies:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
+
+  '@clawnify/agents@0.1.1': {}
 
   '@clawnify/app@0.4.4(@cloudflare/workers-types@4.20260702.1)(@hono/zod-openapi@0.18.4(hono@4.13.13)(zod@3.25.76))(@phosphor-icons/react@2.1.10(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(hono@4.13.13)(react@19.3.0)':
     dependencies:

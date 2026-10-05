@@ -25,6 +25,9 @@ export interface Settings {
   weekdays_only: number;
   crm_app_id: string | null;
   crm_error: string | null;
+  research_agent_id: string | null;
+  research_agent_name: string | null;
+  research_error: string | null;
   running_until: string | null;
   job_id: string | null;
   next_run_at: string | null;
@@ -113,6 +116,10 @@ export interface Touch {
   rationale: string | null;
   written_by: string | null;
   review_note: string | null;
+  research_sent_at: string | null;
+  research_agent_id: string | null;
+  research_tries: number;
+  research_task_id: string | null;
   attempts: number;
   message_id: string | null;
   error: string | null;
@@ -164,7 +171,7 @@ export async function getSettings(): Promise<Settings> {
 
 const EDITABLE = [
   "about", "mailbox", "signature_id", "reply_signature_id", "opt_out", "daily_cap", "ramp_from", "send_from", "send_until",
-  "timezone", "weekdays_only", "crm_app_id",
+  "timezone", "weekdays_only", "crm_app_id", "research_agent_id", "research_agent_name",
 ] as const;
 export type SettingsPatch = Partial<Pick<Settings, (typeof EDITABLE)[number]>>;
 

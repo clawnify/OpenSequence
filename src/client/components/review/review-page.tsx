@@ -6,7 +6,7 @@ import { useApp } from "@/context";
 import { useLoad } from "@/hooks/use-load";
 import { withQuery, type Navigate, type ReviewTab } from "@/hooks/use-router";
 import { cn } from "@/lib/utils";
-import { CHANNEL_LABEL, due, personName, plural } from "@/lib/format";
+import { CHANNEL_LABEL, ago, due, personName, plural } from "@/lib/format";
 import { Avatar, EmptyState, PageHeader, Pager, Pill } from "@/components/shared";
 import { SignaturePreview } from "@/components/signature-preview";
 import { htmlToText, isHtml } from "@/lib/html";
@@ -316,8 +316,25 @@ function laterOf(a: string, b: string | undefined): string {
 }
 
 /** A draft nobody has written yet: the agent's job for a researched step, or the AI's. A person can always write it. */
+/** Matches the engine: a hand-off still without a draft after three hours is made again, at most twice. */
+const RESEARCH_RETRY_MS = 3 * 3_600_000;
+
+/** Where a research step stands with the research agent picked in Settings. */
+function researchStatus(t: Touch, research: { agent: { id: string; name: string } | null } | undefined): string {
+  const agent = research?.agent;
+  if (!agent) return "This email starts from research. Pick a research agent in Settings and it is handed over on its own, or ask your agent here, or write it yourself.";
+  const handed = t.research;
+  const fresh = !!handed?.sent_at && Date.now() - Date.parse(handed.sent_at) < RESEARCH_RETRY_MS;
+  if (handed?.sent_at && fresh) {
+    const name = handed.agent_id === agent.id ? agent.name : "the research agent picked before";
+    return `Handed to ${name} ${ago(handed.sent_at)}: it researches the person and their company, and the draft lands in To approve.`;
+  }
+  if (handed && handed.tries >= 2) return `${agent.name} didn't hand in a draft after two tries. Write it yourself, or skip this step.`;
+  return `${agent.name} gets it on the next run: it researches the person and their company, and the draft lands in To approve.`;
+}
+
 function WriteIt({ touch: t, onSettled }: { touch: Touch; onSettled: (id: string) => Promise<void> }) {
-  const { setError } = useApp();
+  const { overview, setError } = useApp();
   const hasChat = useHasChat();
   const [open, setOpen] = useState(false);
   const [subject, setSubject] = useState("");
@@ -341,11 +358,12 @@ function WriteIt({ touch: t, onSettled }: { touch: Touch; onSettled: (id: string
     <section aria-label="Writing" className="flex flex-col gap-3 rounded-md bg-card p-4 shadow-edge">
       <p className="text-sm">
         {t.status === "research"
-          ? "This email starts from research: the agent looks into the person and their company, writes it, and hands it in for your approval."
+          ? researchStatus(t, overview?.research)
           : stuck
             ? `The AI couldn't write this one: ${t.error}`
             : "The AI is writing this email from the thread. It lands in To approve when it's ready."}
       </p>
+      {t.status === "research" && overview?.research.error && <Notice>{overview.research.error}</Notice>}
       <div className="flex flex-wrap gap-2">
         {t.status === "research" && hasChat && (
           <Button size="sm" onClick={() => openChat(`In OpenSequence, research the person for touch ${t.id}, write the email, and hand it in with PUT /api/touches/${t.id}/draft for my approval. Never approve or send it.`)}>
