@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ClipboardEvent } from "react";
 import { RefreshCw } from "lucide-react";
 import { api } from "@/api";
 import { useApp } from "@/context";
@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Picker } from "@/components/ui/picker";
+import { SignaturePreview } from "@/components/signature-preview";
+import { clipboardFragment, isHtml } from "@/lib/html";
 import type { SettingsView } from "@/types";
 
 function zones(current: string): Array<{ value: string; label: string }> {
@@ -141,7 +143,7 @@ export function SettingsPage() {
 
           <Section title="Writing" description="Every draft starts from what you sell and the campaign's angle. The signature and the opt-out line are added under every email when it goes out.">
             <TextSetting label="What you sell" rows={3} max={1000} value={s.about} disabled={!can} placeholder="e.g. Site management software for building firms: permits, planning and photos in one place." onSave={(t) => void save({ about: t })} />
-            <TextSetting label="Signature" rows={4} max={1000} value={s.signature} disabled={!can} placeholder={"Sam de Vries\nOurCo · ourco.example"} onSave={(t) => void save({ signature: t })} />
+            <SignatureSetting value={s.signature} disabled={!can} onSave={(t) => save({ signature: t })} />
             <TextSetting label="Opt-out line" rows={2} max={300} value={s.opt_out} disabled={!can} onSave={(t) => void save({ opt_out: t })}
               hint="Required, in any words you like: people answer in their own, and the AI reads every reply. Anyone who asks you to stop is never emailed again; a short answer that might mean it is flagged on Replies for you to decide." />
           </Section>
@@ -158,6 +160,85 @@ export function SettingsPage() {
         </div>
       </div>
     </>
+  );
+}
+
+/**
+ * The signature: plain text, or HTML as Gmail keeps it. Pasting formatted text
+ * (copied from Gmail's signature settings or anywhere) keeps its formatting and
+ * links; "Copy from Gmail" reads the sending mailbox's default signature. An
+ * HTML signature is shown as it will look, its HTML a click away.
+ */
+function SignatureSetting({ value, disabled, onSave }: { value: string; disabled?: boolean; onSave: (v: string) => Promise<void> }) {
+  const { setError } = useApp();
+  const [text, setText] = useState(value);
+  const [editing, setEditing] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => setText(value), [value]);
+  const html = isHtml(text);
+
+  const commit = async (next: string) => {
+    setText(next);
+    if (next !== value) await onSave(next);
+  };
+
+  const onPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const pasted = e.clipboardData.getData("text/html");
+    if (!pasted) return; // plain text pastes as usual
+    e.preventDefault();
+    const el = e.currentTarget;
+    const next = text.slice(0, el.selectionStart) + clipboardFragment(pasted) + text.slice(el.selectionEnd);
+    setEditing(false);
+    void commit(next);
+  };
+
+  const fromGmail = async () => {
+    setNote(null);
+    try {
+      const r = await api<{ address: string; signature: string }>("GET", "/api/settings/gmail-signature");
+      if (!r.signature) {
+        setNote(`Gmail has no default signature for ${r.address}. Pick one under Gmail's Settings, Signature, "For new emails use", or copy it there and paste it here.`);
+        return;
+      }
+      setEditing(false);
+      await commit(r.signature);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not read Gmail's signature");
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <label htmlFor="signature" className="text-sm font-medium">Signature</label>
+        <div className="flex gap-1">
+          {html && !editing && <Button size="sm" variant="ghost" disabled={disabled} onClick={() => setEditing(true)}>Edit HTML</Button>}
+          {html && <Button size="sm" variant="ghost" disabled={disabled} onClick={() => { setEditing(false); void commit(""); }}>Remove</Button>}
+          <Button size="sm" variant="ghost" disabled={disabled} onClick={() => void fromGmail()}>Copy from Gmail</Button>
+        </div>
+      </div>
+      {html && !editing ? (
+        <div className="rounded-md bg-card px-3 py-2.5 shadow-edge">
+          <SignaturePreview html={text} />
+        </div>
+      ) : (
+        <Textarea
+          id="signature"
+          rows={html ? 8 : 4}
+          value={text}
+          disabled={disabled}
+          onChange={(e) => setText(e.target.value)}
+          onPaste={onPaste}
+          onBlur={() => { if (text !== value) void commit(text); if (editing) setEditing(false); }}
+          className={cn(html && "font-mono text-[0.8125rem]")}
+          placeholder={"Sam de Vries\nOurCo · ourco.example\n\nOr paste a formatted signature: it keeps its links and styling."}
+        />
+      )}
+      {note && <p className="text-[0.8125rem] text-muted-foreground">{note}</p>}
+      <span className="text-[0.8125rem] text-muted-foreground">
+        With a formatted signature, emails go out as HTML, the way Gmail sends them; with plain text, as plain text.
+      </span>
+    </div>
   );
 }
 

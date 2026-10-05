@@ -8,6 +8,8 @@ import { withQuery, type Navigate, type ReviewTab } from "@/hooks/use-router";
 import { cn } from "@/lib/utils";
 import { CHANNEL_LABEL, due, personName, plural } from "@/lib/format";
 import { Avatar, EmptyState, PageHeader, Pager, Pill } from "@/components/shared";
+import { SignaturePreview } from "@/components/signature-preview";
+import { htmlToText, isHtml } from "@/lib/html";
 import { Notice } from "@/components/settings-ui";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -232,7 +234,8 @@ function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (i
     void act(() => api("PATCH", `/api/touches/${t.id}`, t.starts_thread ? { subject, body } : { body }), false);
   };
 
-  const footer = [overview?.footer.signature, overview?.footer.opt_out].filter((x) => x?.trim()).join("\n\n");
+  const signature = overview?.footer.signature.trim() ?? "";
+  const optOut = overview?.footer.opt_out.trim() ?? "";
 
   return (
     <section aria-label="The email" className="flex flex-col gap-3">
@@ -262,7 +265,12 @@ function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (i
         <label htmlFor="body" className="sr-only">Email</label>
         <Textarea id="body" value={body} onChange={(e) => setBody(e.target.value)} onBlur={save} disabled={approved || busy} rows={12}
           className="min-h-[14rem] resize-y rounded-none bg-transparent px-4 py-3 leading-relaxed shadow-none focus-visible:ring-0 focus-visible:ring-offset-0" />
-        {footer && <p className="whitespace-pre-wrap border-t border-border px-4 py-2.5 text-[0.8125rem] text-faint">{footer}</p>}
+        {(signature || optOut) && (
+          <div className="flex flex-col gap-2 border-t border-border px-4 py-2.5 text-[0.8125rem] text-faint">
+            {signature && (isHtml(signature) ? <SignaturePreview html={signature} muted /> : <p className="whitespace-pre-wrap">{signature}</p>)}
+            {optOut && <p className="whitespace-pre-wrap">{optOut}</p>}
+          </div>
+        )}
       </div>
 
       {approved ? (
@@ -448,7 +456,7 @@ function Context({ detail }: { detail: TouchDetail }) {
               <summary className="cursor-pointer text-[0.8125rem] text-muted-foreground">
                 Email {m.position}{m.subject ? `: ${m.subject}` : ""} · {new Date(m.sent_at).toLocaleDateString()}
               </summary>
-              <p className="mt-2 whitespace-pre-wrap text-[0.8125rem]">{m.body}</p>
+              <p className="mt-2 whitespace-pre-wrap text-[0.8125rem]">{isHtml(m.body) ? htmlToText(m.body) : m.body}</p>
             </details>
           ))}
         </section>

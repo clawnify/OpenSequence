@@ -23,7 +23,7 @@ Built with **React, Tailwind and shadcn/ui** on a **Hono API** and a **SQLite da
 - **Replies**: what came back, with the AI's reading, an excerpt, and a link to the message in Gmail.
 - **Campaigns**: each campaign's numbers; its page has the angle, the steps and the people in it.
 - **People**: everyone, with their campaign and status; a person's page has their emails, tasks and replies.
-- **Settings**: the mailbox, sending hours and time zone, daily cap and warm-up, what you sell, the signature and opt-out line, and the CRM.
+- **Settings**: the mailbox, sending hours and time zone, daily cap and warm-up, what you sell, the signature and opt-out line, and the CRM. A signature can be plain text or formatted: paste it from Gmail's signature settings (or copy the mailbox's default one from Gmail with a click) and it keeps its links and styling, and emails then go out as HTML, the way Gmail sends them.
 
 ## For agents
 

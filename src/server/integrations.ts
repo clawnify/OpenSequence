@@ -96,14 +96,24 @@ function sentOf(data: unknown): Sent {
   return { messageId, threadId };
 }
 
-/** A new email, which starts a thread (Composio GMAIL_SEND_EMAIL, plain text). */
-export async function sendNew(mail: Mail, to: string, subject: string, body: string): Promise<Sent> {
-  return sentOf(await mail.run("SEND_EMAIL", { recipient_email: to, subject, body, is_html: false }));
+/** A new email, which starts a thread (Composio GMAIL_SEND_EMAIL). `html`
+ *  sends it as text/html exactly as given; otherwise it is plain text. */
+export async function sendNew(mail: Mail, to: string, subject: string, body: string, html = false): Promise<Sent> {
+  return sentOf(await mail.run("SEND_EMAIL", { recipient_email: to, subject, body, is_html: html }));
 }
 
-/** A reply inside a thread. Gmail keeps the thread's subject (GMAIL_REPLY_TO_THREAD). */
-export async function sendReply(mail: Mail, to: string, threadId: string, body: string): Promise<Sent> {
-  return sentOf(await mail.run("REPLY_TO_THREAD", { thread_id: threadId, recipient_email: to, message_body: body, is_html: false }));
+/** A reply inside a thread. Gmail keeps the thread's subject and quotes the
+ *  thread below it (GMAIL_REPLY_TO_THREAD). */
+export async function sendReply(mail: Mail, to: string, threadId: string, body: string, html = false): Promise<Sent> {
+  return sentOf(await mail.run("REPLY_TO_THREAD", { thread_id: threadId, recipient_email: to, message_body: body, is_html: html }));
+}
+
+/** The signature Gmail adds to new emails from this mailbox. Gmail's API
+ *  only knows the one picked under "Signature defaults: for new emails";
+ *  named signatures with no default read as "". */
+export async function gmailSignature(mail: Mail): Promise<string> {
+  const data = (await mail.run("SETTINGS_SEND_AS_GET", { user_id: "me", send_as_email: mail.address })) as { signature?: string } | null;
+  return typeof data?.signature === "string" ? data.signature : "";
 }
 
 export async function readThread(mail: Mail, threadId: string): Promise<GmailMessage[]> {

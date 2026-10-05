@@ -529,6 +529,35 @@ export function composeBody(body: string, signature: string, optOut: string): st
   return [body.trim(), signature.trim(), optOut.trim()].filter(Boolean).join("\n\n");
 }
 
+/** Whether a signature is HTML (pasted from Gmail's settings or a signature
+ *  maker) rather than plain text. Only real tag names count, and nothing with an
+ *  @ in it: "Sam <sam@ourco.io>" is a plain-text signature line. */
+const HTML_TAG = /<\/?(a|b|br|div|p|span|img|table|tbody|thead|tr|td|th|font|strong|em|i|u|s|ul|ol|li|hr|h[1-6]|small|sub|sup|blockquote|center|html|body|meta|style)\b[^<>@]*>/i;
+
+export function isHtml(text: string): boolean {
+  return HTML_TAG.test(text);
+}
+
+const ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
+/** Plain text as HTML that reads the same: escaped, line breaks kept. */
+export function textToHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (c) => ESCAPES[c]).replace(/\r\n?/g, "\n").replace(/\n/g, "<br>");
+}
+
+/**
+ * The email as it goes out. With a plain signature it stays plain text, which
+ * is what a person's own cold email looks like. With an HTML signature the
+ * whole email is HTML: the draft and the opt-out line escaped with their line
+ * breaks kept, the signature in Gmail's own signature block.
+ */
+export function composeEmail(body: string, signature: string, optOut: string): { body: string; html: boolean } {
+  if (!isHtml(signature)) return { body: composeBody(body, signature, optOut), html: false };
+  const parts = [textToHtml(body.trim()), `<div class="gmail_signature">${signature.trim()}</div>`];
+  if (optOut.trim()) parts.push(textToHtml(optOut.trim()));
+  return { body: `<div dir="ltr">${parts.join("<br><br>")}</div>`, html: true };
+}
+
 // ── The calendar ───────────────────────────────────────────────────
 
 export interface CalendarAttendee {

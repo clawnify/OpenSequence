@@ -4,14 +4,15 @@ import type { Context } from "hono";
 import type { CredentialBinding } from "@clawnify/connections";
 import { query, get, run } from "./db.js";
 import {
-  CHANNELS, WRITERS, dayStart, dailyCap, isDay, isTimezone, localDay, minutesOf, nextSendAt, normaliseEmail, validateSteps,
+  CHANNELS, WRITERS, dayStart, dailyCap, isDay, isHtml, isTimezone, localDay, minutesOf, nextSendAt, normaliseEmail, validateSteps,
 } from "./sequence-rules.js";
+import { MAX_SIGNATURE, sanitizeSignature } from "./signature.js";
 import {
   advance, cleanPerson, endEnrollments, enroll, getSettings, parts, saveSettings, skipOpenTouches, stepsOf, unsubscribe,
   upsertPerson, type Campaign, type Enrollment, type Person, type Settings, type SettingsPatch, type Step, type Touch,
 } from "./store.js";
 import { crmAppOf, ensureScheduled, runAndBook, scheduleRun, windowOf, type EngineEnv } from "./engine.js";
-import { connectionStatus, contactApps, crmContactsPage, mailboxes } from "./integrations.js";
+import { connectionStatus, contactApps, crmContactsPage, gmailSignature, mailFor, mailboxes } from "./integrations.js";
 
 // In production Clawnify injects the CREDENTIALS broker binding, CLAWNIFY_ORG_ID
 // and the org token (CLAWNIFY_TOKEN: the platform queue, the model endpoint and
@@ -1239,8 +1240,16 @@ app.put("/api/settings", async (c) => {
       patch[key] = (v as string | null) ?? "";
       return null;
     };
-    const bad = text("about", 1000) ?? text("signature", 1000) ?? text("opt_out", 300, true);
+    const bad = text("about", 1000) ?? text("opt_out", 300, true);
     if (bad) return c.json({ error: bad === "opt-out is required" ? "Every email carries an opt-out line: write one" : bad }, 400);
+    if (b.signature !== undefined) {
+      if (typeof b.signature !== "string") return c.json({ error: "signature must be text or HTML" }, 400);
+      // HTML (pasted from Gmail's settings) is cleaned to what a signature needs; plain text is kept as is.
+      const raw = b.signature.replace(/\r\n?/g, "\n").trim();
+      const signature = isHtml(raw) ? await sanitizeSignature(raw) : raw;
+      if (signature.length > MAX_SIGNATURE) return c.json({ error: "The signature is at most 10,000 characters" }, 400);
+      patch.signature = signature;
+    }
     if (b.mailbox !== undefined) {
       if (b.mailbox === null) patch.mailbox = null;
       else {
@@ -1288,6 +1297,23 @@ app.put("/api/settings", async (c) => {
     return c.json(await settingsView(c), 200);
   } catch (err) {
     return fail(c, err);
+  }
+});
+
+// The signature Gmail adds to new emails from the sending mailbox (or the
+// main Gmail before one is picked), cleaned like a pasted one. Gmail's API only
+// knows the one set under "Signature defaults: for new emails".
+app.get("/api/settings/gmail-signature", async (c) => {
+  if (!isPerson(c)) return c.json({ error: "Only a signed-in person can read the mailbox's settings." }, 403);
+  try {
+    const s = await getSettings();
+    const boxes = await mailboxes(c.env);
+    const address = s.mailbox ?? boxes.find((m) => m.isDefault)?.address ?? boxes[0]?.address;
+    if (!address) return c.json({ error: "Gmail isn't connected" }, 409);
+    const raw = (await gmailSignature(await mailFor(c.env, address))).trim();
+    return c.json({ address, signature: raw && isHtml(raw) ? await sanitizeSignature(raw) : raw }, 200);
+  } catch (err) {
+    return fail(c, err, 409);
   }
 });
 
