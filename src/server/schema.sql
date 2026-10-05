@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS campaigns (
   stop_company INTEGER NOT NULL DEFAULT 1,  -- a reply or meeting from anyone at a company stops everyone there
   signature_id TEXT,                        -- first emails: null = the workspace default, 'none' = no signature, else a signature
   reply_signature_id TEXT,                  -- follow-ups: the same
+  source_app_id TEXT,                       -- an app in the workspace that keeps lists of people (OpenProspector); null: none
+  source_list_id TEXT,                      -- the list new people come from, every day
+  source_list_name TEXT,                    -- its name when it was picked, for the screens
+  source_daily INTEGER NOT NULL DEFAULT 10, -- new people a day from the list, at most
+  source_per_company INTEGER NOT NULL DEFAULT 3, -- people per company in this campaign, at most
+  source_checked_at TEXT,                   -- the last read of the list
+  source_error TEXT,                        -- why the last read of the list, or telling it our demand, failed
   created_by TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
@@ -172,3 +179,16 @@ CREATE INDEX IF NOT EXISTS idx_touches_sent ON touches(sent_at);
 CREATE INDEX IF NOT EXISTS idx_people_domain ON people(domain);
 CREATE INDEX IF NOT EXISTS idx_inbound_open ON inbound(handled_at, received_at);
 CREATE INDEX IF NOT EXISTS idx_inbound_enrollment ON inbound(enrollment_id);
+
+-- People a campaign took from its list: enrolled, or skipped and why. A lead is
+-- taken once per campaign; the list's app stays the record of who was found.
+CREATE TABLE IF NOT EXISTS source_taken (
+  campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+  lead_id TEXT NOT NULL,                    -- the person's id in the list's app
+  person_id TEXT,                           -- who it became here
+  outcome TEXT NOT NULL,                    -- 'enrolled' | 'skipped'
+  reason TEXT,                              -- why it was skipped
+  taken_at TEXT NOT NULL,                   -- ISO time
+  PRIMARY KEY (campaign_id, lead_id)
+);
+CREATE INDEX IF NOT EXISTS idx_source_taken_day ON source_taken(campaign_id, outcome, taken_at);

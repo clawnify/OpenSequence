@@ -48,6 +48,13 @@ export interface Campaign {
   /** null: the workspace default; "none": no signature; else a signature's id. */
   signature_id: string | null;
   reply_signature_id: string | null;
+  source_app_id: string | null;
+  source_list_id: string | null;
+  source_list_name: string | null;
+  source_daily: number;
+  source_per_company: number;
+  source_checked_at: string | null;
+  source_error: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;

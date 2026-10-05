@@ -5,9 +5,9 @@ import { api } from "@/api";
 import { useApp } from "@/context";
 import { useLoad } from "@/hooks/use-load";
 import type { Navigate } from "@/hooks/use-router";
-import { CAMPAIGN_STATUS, CHANNEL_LABEL, ENROLLMENT_STATUS, due, personName, plural } from "@/lib/format";
+import { CAMPAIGN_STATUS, CHANNEL_LABEL, ENROLLMENT_STATUS, ago, due, personName, plural } from "@/lib/format";
 import { EmptyState, PageHeader, Pager, Pill, SectionTitle } from "@/components/shared";
-import { Switch } from "@/components/settings-ui";
+import { Notice, Switch } from "@/components/settings-ui";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -16,7 +16,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AddPeopleDialog } from "./add-people-dialog";
-import type { Campaign, CampaignPerson, Channel, EnrollmentStatus, Page, Signature, Step, Writer } from "@/types";
+import type { Campaign, CampaignPerson, Channel, EnrollmentStatus, Page, PeopleList, Signature, SourceActivity, Step, Writer } from "@/types";
 
 const CHANNELS: Channel[] = ["email", "call", "linkedin", "task"];
 const WRITER_OPTIONS: Array<{ value: Writer; label: string; hint: string }> = [
@@ -26,7 +26,7 @@ const WRITER_OPTIONS: Array<{ value: Writer; label: string; hint: string }> = [
 
 export function CampaignPage({ id, navigate }: { id: string; navigate: Navigate }) {
   const { setError, refresh } = useApp();
-  const data = useLoad<{ campaign: Campaign; steps: Step[] }>(`/api/campaigns/${encodeURIComponent(id)}`);
+  const data = useLoad<{ campaign: Campaign; steps: Step[]; source_activity?: SourceActivity }>(`/api/campaigns/${encodeURIComponent(id)}`);
   const [peopleKey, setPeopleKey] = useState(0);
   const [adding, setAdding] = useState(false);
   const [confirm, setConfirm] = useState<"archive" | "delete" | null>(null);
@@ -89,6 +89,7 @@ export function CampaignPage({ id, navigate }: { id: string; navigate: Navigate 
             <SectionTitle action={c.status !== "archived" && <Button size="sm" variant="outline" onClick={() => setAdding(true)}><UserPlus /> Add people</Button>}>
               People
             </SectionTitle>
+            <ListSource campaign={c} activity={data.data?.source_activity} onSave={patch} />
             <CampaignPeople key={peopleKey} campaign={c} navigate={navigate} onChanged={() => void data.reload()} />
           </section>
         </div>
@@ -138,6 +139,74 @@ function About({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record
       </div>
       <CampaignSignatures campaign={c} onSave={onSave} />
     </section>
+  );
+}
+
+/**
+ * Where new people come from on their own: a list in another app of the
+ * workspace (OpenProspector), read every hour, up to a number a day.
+ */
+function ListSource({ campaign: c, activity, onSave }: { campaign: Campaign; activity?: SourceActivity; onSave: (b: Record<string, unknown>) => Promise<void> }) {
+  const sources = useLoad<{ apps: Array<{ id: string; name: string; lists: PeopleList[]; error: string | null }> }>("/api/sources");
+  if (!sources.data) return null;
+  const apps = sources.data.apps;
+  const current = c.source ? `${c.source.app_id}:${c.source.list_id}` : "";
+  if (!apps.length && !c.source) {
+    return <p className="text-[0.8125rem] text-muted-foreground">To fill this campaign every day, add OpenProspector to the workspace and make a list there.</p>;
+  }
+  const options = [
+    { value: "", label: "No list" },
+    ...apps.flatMap((a) => a.lists.map((l) => ({ value: `${a.id}:${l.id}`, label: l.name, hint: `${a.name} · ${plural(l.verified_count, "person", "people")} with an email` }))),
+  ];
+  if (c.source && !options.some((o) => o.value === current)) options.push({ value: current, label: `${c.source.list_name} (not found now)` });
+  const pick = (v: string) => {
+    if (!v) return void onSave({ source: null });
+    const [appId, ...rest] = v.split(":");
+    void onSave({ source: { app_id: appId, list_id: rest.join(":") } });
+  };
+  const skipped = activity?.recent.filter((r) => r.outcome === "skipped").slice(0, 3) ?? [];
+  return (
+    <div className="flex flex-col gap-2 rounded-md bg-card p-3 shadow-edge">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-2 text-sm">
+        <span>New people from</span>
+        <Picker label="List" className="w-64" disabled={c.status === "archived"} value={current} options={options} searchPlaceholder="Search lists" onChange={pick} />
+        {c.source && (
+          <>
+            <span>up to</span>
+            <NumberField label="New people a day, at most" value={c.source.daily} min={1} max={200} onSave={(n) => void onSave({ source: { daily: n } })} />
+            <span>a day, at most</span>
+            <NumberField label="People per company, at most" value={c.source.per_company} min={1} max={20} onSave={(n) => void onSave({ source: { per_company: n } })} />
+            <span>per company</span>
+          </>
+        )}
+      </div>
+      {c.source && (
+        <p className="text-[0.8125rem] text-muted-foreground">
+          Today {activity?.taken_today ?? 0} of {c.source.daily} taken; {c.source.checked_at ? `checked ${ago(c.source.checked_at)}` : "not checked yet"}.
+          {" "}Only people with a verified email, and nobody twice. The list looks up just enough emails for this number.
+        </p>
+      )}
+      {skipped.map((r) => (
+        <p key={`${r.email}-${r.taken_at}`} className="text-[0.8125rem] text-muted-foreground">Skipped {r.email ?? "a lead"}: {r.reason}</p>
+      ))}
+      {c.source?.error && <Notice>{c.source.error}</Notice>}
+      {apps.filter((a) => a.error).map((a) => <Notice key={a.id}>{a.name}'s lists can't be read: {a.error}</Notice>)}
+    </div>
+  );
+}
+
+/** A small whole number, saved when you leave it. */
+function NumberField({ label, value, min, max, onSave }: { label: string; value: number; min: number; max: number; onSave: (n: number) => void }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => setText(String(value)), [value]);
+  const commit = () => {
+    const n = Number(text);
+    if (Number.isInteger(n) && n >= min && n <= max && n !== value) onSave(n);
+    else setText(String(value));
+  };
+  return (
+    <Input aria-label={label} type="number" inputMode="numeric" min={min} max={max} value={text} className="h-8 w-16"
+      onChange={(e) => setText(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />
   );
 }
 

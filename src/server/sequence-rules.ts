@@ -659,3 +659,51 @@ export function researchInstruction(app: { id: string | null; url: string | null
     "If you find nothing worth writing about someone, hand in nothing for them and say why in your summary. Never approve or send anything.",
   ].join("\n");
 }
+
+// ── People from a list ─────────────────────────────────────────────
+
+/** A campaign reads its list at most this often. */
+export const SOURCE_CHECK_MS = 60 * MINUTE_MS;
+
+/** A person in a list, as the list's app gives it (an OpenProspector lead). */
+export interface ListLead {
+  id: string;
+  full_name: string;
+  title: string;
+  company: string;
+  domain: string;
+  linkedin_url: string;
+  source_url: string;
+  evidence: string;
+  email: string;
+  email_verified: number;
+  phone: string;
+}
+
+/** The person a lead becomes here. Its evidence goes into the notes, which the writer works from. */
+export function leadPerson(l: ListLead): Record<string, string> {
+  const [first = "", ...rest] = (l.full_name ?? "").trim().split(/\s+/);
+  const notes = [(l.evidence ?? "").trim(), (l.source_url ?? "").trim() ? `Found at: ${l.source_url.trim()}` : ""].filter(Boolean).join("\n");
+  return {
+    email: l.email, first_name: first, last_name: rest.join(" "), title: l.title ?? "", company: l.company ?? "",
+    linkedin_url: l.linkedin_url ?? "", phone: l.phone ?? "", notes,
+  };
+}
+
+/**
+ * Whether a campaign takes a lead now: not if it took it before, not without a
+ * verified email, and not once the company (by email domain; a personal
+ * address is no company) already has `cap` people in the campaign.
+ */
+export function leadVerdict(
+  l: ListLead,
+  taken: Set<string>,
+  perCompany: Map<string, number>,
+  cap: number,
+  domain: string,
+): "take" | "taken" | "unverified" | "company_full" {
+  if (taken.has(l.id)) return "taken";
+  if (!l.email || !l.email_verified) return "unverified";
+  if (domain && (perCompany.get(domain) ?? 0) >= cap) return "company_full";
+  return "take";
+}

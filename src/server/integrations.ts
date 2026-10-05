@@ -8,7 +8,7 @@
 import { createAgents } from "@clawnify/agents";
 import { offering, type OrgDocument } from "@clawnify/knowledge";
 import { accounts, connect, describe, type ConnectionsEnv } from "@clawnify/connections";
-import type { CalendarEvent, GmailMessage } from "./sequence-rules.js";
+import type { CalendarEvent, GmailMessage, ListLead } from "./sequence-rules.js";
 import { normaliseEmail } from "./sequence-rules.js";
 
 export const SERVICES = { mail: "gmail", calendar: "googlecalendar", google: "googlesuper" } as const;
@@ -273,8 +273,8 @@ export async function handToAgent(env: PlatformEnv, agentId: string, instruction
   return (await agentsApi(env).dispatch({ instruction, server_id: agentId, payload, idempotency_key: key })).task_id;
 }
 
-async function crmFetch<T>(env: PlatformEnv, appId: string, method: string, path: string, body?: unknown): Promise<T> {
-  if (!env.CLAWNIFY_TOKEN) throw new Error("No Clawnify token: the CRM can't be reached from here");
+async function appFetch<T>(env: PlatformEnv, appId: string, method: string, path: string, body?: unknown): Promise<T> {
+  if (!env.CLAWNIFY_TOKEN) throw new Error("No Clawnify token: other apps can't be reached from here");
   const res = await fetch(`${platformBase(env)}/v1/apps/${encodeURIComponent(appId)}/proxy${path}`, {
     method,
     headers: { Authorization: `Bearer ${env.CLAWNIFY_TOKEN}`, "Content-Type": "application/json" },
@@ -288,7 +288,7 @@ async function crmFetch<T>(env: PlatformEnv, appId: string, method: string, path
   } catch {
     data = { error: text.slice(0, 200) };
   }
-  if (!res.ok) throw new Error(`The CRM answered ${res.status}: ${(data as { error?: string }).error ?? "no reason given"}`);
+  if (!res.ok) throw new Error(`The app answered ${res.status}: ${(data as { error?: string }).error ?? "no reason given"}`);
   return data as T;
 }
 
@@ -310,7 +310,7 @@ export async function crmContactsPage(
 ): Promise<{ contacts: CrmContact[]; total: number; page: number; limit: number }> {
   const q = new URLSearchParams({ page: String(opts.page), limit: "50" });
   if (opts.search) q.set("search", opts.search);
-  return crmFetch(env, appId, "GET", `/api/contacts?${q}`);
+  return appFetch(env, appId, "GET", `/api/contacts?${q}`);
 }
 
 /** The CRM contact for an address: the one with exactly that email, else a new one. */
@@ -322,7 +322,7 @@ export async function crmContactFor(
   const found = await crmContactsPage(env, appId, { page: 1, search: p.email });
   const match = found.contacts.find((c) => normaliseEmail(c.email) === p.email);
   if (match) return match.id;
-  const created = await crmFetch<{ id?: string; contact?: { id?: string } }>(env, appId, "POST", "/api/contacts", {
+  const created = await appFetch<{ id?: string; contact?: { id?: string } }>(env, appId, "POST", "/api/contacts", {
     first_name: p.first_name || p.email.slice(0, p.email.indexOf("@")),
     last_name: p.last_name,
     email: p.email,
@@ -336,5 +336,46 @@ export async function crmContactFor(
 
 /** A line on the contact's timeline. `email` counts toward its emails. */
 export async function crmNote(env: PlatformEnv, appId: string, contactId: string, type: "email" | "note", text: string): Promise<void> {
-  await crmFetch(env, appId, "POST", "/api/activities", { entity_type: "contact", entity_id: contactId, type, body: text });
+  await appFetch(env, appId, "POST", "/api/activities", { entity_type: "contact", entity_id: contactId, type, body: text });
+}
+
+// ── Lists of people in the same workspace (OpenProspector) ─────────
+
+/** The org's live apps that keep lists of people, this one left out. */
+export async function leadApps(env: PlatformEnv, selfOrigin: string): Promise<SiblingApp[]> {
+  return (await directory(env)).filter((a) => a.url !== selfOrigin && Array.isArray(a.provides) && a.provides.includes("leads"));
+}
+
+export interface PeopleList {
+  id: string;
+  name: string;
+  refresh: string;
+  member_count: number;
+  verified_count: number;
+}
+
+/** An app's lists (the first 100). */
+export async function listsOf(env: PlatformEnv, appId: string): Promise<PeopleList[]> {
+  const r = await appFetch<{ lists?: PeopleList[] }>(env, appId, "GET", "/api/lists?page=1&limit=100");
+  return r.lists ?? [];
+}
+
+/** A page of a list's people with a verified email, in the order they joined it. */
+export async function listMembersPage(
+  env: PlatformEnv,
+  appId: string,
+  listId: string,
+  page: number,
+): Promise<{ members: ListLead[]; total: number; page: number; limit: number }> {
+  const q = new URLSearchParams({ email_verified: "true", page: String(page), limit: "100" });
+  return appFetch(env, appId, "GET", `/api/lists/${encodeURIComponent(listId)}/members?${q}`);
+}
+
+/** Tells the list how many people a day this campaign takes, which sizes its email lookups. */
+export async function setListDemand(env: PlatformEnv, appId: string, listId: string, key: string, name: string, daily: number): Promise<void> {
+  await appFetch(env, appId, "PUT", `/api/lists/${encodeURIComponent(listId)}/consumers/${encodeURIComponent(key)}`, { name, daily });
+}
+
+export async function dropListDemand(env: PlatformEnv, appId: string, listId: string, key: string): Promise<void> {
+  await appFetch(env, appId, "DELETE", `/api/lists/${encodeURIComponent(listId)}/consumers/${encodeURIComponent(key)}`);
 }

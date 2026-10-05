@@ -19,16 +19,17 @@ import { bookableAt } from "./jobs.js";
 import { complete, ModelError, type AiEnv } from "./model.js";
 import {
   calendarPage, calendarRun, crmContactFor, crmNote, handToAgent, mailFor, readMessage, readThread, searchMail, selfAppId, sendNew,
-  sendReply, whatWeSell, type Mail, type PlatformEnv,
+  listMembersPage, sendReply, whatWeSell, type Mail, type PlatformEnv,
 } from "./integrations.js";
 import {
   DAY_MS, MINUTE_MS, PREPARE_AHEAD_MS, addressOf, addressesIn, bookedWith, coerceDraft, coerceReading, companyDomain,
   composeEmail, dailyCap, dayStart, draftPrompt, signatureFor, emailDomain, inboundKind, isInbound, localDay, needsOptOutCheck, nextSendAt, normaliseEmail,
-  ownWords, prepareBudget, readingPrompt, researchBatch, researchInstruction, type GmailMessage, type ResearchWaiting, type Window,
+  leadPerson, leadVerdict, ownWords, prepareBudget, readingPrompt, researchBatch, researchInstruction, SOURCE_CHECK_MS, type GmailMessage,
+  type ResearchWaiting, type Window,
 } from "./sequence-rules.js";
 import {
-  OPEN_TOUCH, advance, endEnrollments, getSettings, isPersonal, parts, personName, signatureBodies, skipOpenTouches, stepsOf, stopAround,
-  stopCompany, unsubscribe, type Enrollment, type Person, type Settings, type Touch,
+  OPEN_TOUCH, advance, cleanPerson, endEnrollments, enroll, getSettings, isPersonal, parts, personName, signatureBodies, skipOpenTouches, stepsOf,
+  stopAround, stopCompany, unsubscribe, upsertPerson, type Campaign, type Enrollment, type Person, type Settings, type Touch,
 } from "./store.js";
 
 export type EngineEnv = ConnectionsEnv & AiEnv & PlatformEnv & {
@@ -404,6 +405,78 @@ async function resumePaused(now: Date): Promise<void> {
   );
 }
 
+/** The pages of a list one run reads for a campaign, at most. */
+const LIST_PAGES = 5;
+
+/**
+ * Campaigns with a list take new people from it: up to their daily number,
+ * reading it at most hourly, never the same lead twice, and no more per
+ * company than their cap. The list's app stays the record of who was found
+ * and why; the evidence comes along in the notes, for the writer. Someone
+ * already here keeps their own record.
+ */
+async function pullLists(ctx: Ctx): Promise<void> {
+  if (!ctx.env.CLAWNIFY_TOKEN) return;
+  const due = await query<Campaign>(
+    `SELECT * FROM campaigns WHERE status = 'active' AND source_list_id IS NOT NULL AND source_app_id IS NOT NULL
+        AND (source_checked_at IS NULL OR source_checked_at <= ?)`,
+    [new Date(ctx.now.getTime() - SOURCE_CHECK_MS).toISOString()],
+  );
+  const since = dayStart(ctx.now, ctx.s.timezone).toISOString();
+  for (const c of due) {
+    if (Date.now() > ctx.deadline) {
+      ctx.more = true;
+      return;
+    }
+    let error: string | null = null;
+    try {
+      const today = (await get<{ n: number }>(
+        "SELECT COUNT(*) AS n FROM source_taken WHERE campaign_id = ? AND outcome = 'enrolled' AND taken_at >= ?",
+        [c.id, since],
+      ))?.n ?? 0;
+      let room = c.source_daily - today;
+      if (room > 0) {
+        const taken = new Set((await query<{ lead_id: string }>("SELECT lead_id FROM source_taken WHERE campaign_id = ?", [c.id])).map((r) => r.lead_id));
+        const perCompany = new Map((await query<{ domain: string; n: number }>(
+          "SELECT p.domain, COUNT(*) AS n FROM enrollments e JOIN people p ON p.id = e.person_id WHERE e.campaign_id = ? AND p.domain != '' GROUP BY p.domain",
+          [c.id],
+        )).map((r) => [r.domain, r.n]));
+        const record = (leadId: string, personId: string | null, outcome: "enrolled" | "skipped", reason: string | null) =>
+          run("INSERT OR IGNORE INTO source_taken (campaign_id, lead_id, person_id, outcome, reason, taken_at) VALUES (?, ?, ?, ?, ?, ?)",
+            [c.id, leadId, personId, outcome, reason, new Date().toISOString()]);
+        for (let page = 1; page <= LIST_PAGES && room > 0; page++) {
+          const r = await listMembersPage(ctx.env, c.source_app_id!, c.source_list_id!, page);
+          for (const lead of r.members) {
+            if (room <= 0) break;
+            const domain = companyDomain(normaliseEmail(lead.email), isPersonal);
+            if (leadVerdict(lead, taken, perCompany, c.source_per_company, domain) !== "take") continue;
+            taken.add(lead.id);
+            const clean = cleanPerson(leadPerson(lead));
+            if ("error" in clean) {
+              await record(lead.id, null, "skipped", clean.error);
+              continue;
+            }
+            const existing = await get<Person>("SELECT * FROM people WHERE email = ?", [clean.email]);
+            const person = existing ?? (await upsertPerson(clean, "list")).person;
+            const result = await enroll(c.id, [person.id], "list", ctx.now);
+            if (result.enrolled) {
+              room--;
+              if (domain) perCompany.set(domain, (perCompany.get(domain) ?? 0) + 1);
+              await record(lead.id, person.id, "enrolled", null);
+            } else {
+              await record(lead.id, person.id, "skipped", result.skipped[0]?.reason ?? "Not added");
+            }
+          }
+          if (r.members.length === 0 || r.page * r.limit >= r.total) break;
+        }
+      }
+    } catch (e) {
+      error = `Couldn't read ${c.source_list_name ?? "the list"}: ${(e as Error).message}`.slice(0, 300);
+    }
+    await run("UPDATE campaigns SET source_checked_at = ?, source_error = ? WHERE id = ?", [ctx.now.toISOString(), error, c.id]);
+  }
+}
+
 /** Steps due soon become touches, up to about two days of sending in the queue. */
 async function prepare(ctx: Ctx, cap: number): Promise<void> {
   const open = (await get<{ n: number }>(`SELECT COUNT(*) AS n FROM touches WHERE status IN ('research', 'drafting', 'review', 'approved')`))?.n ?? 0;
@@ -755,6 +828,7 @@ export async function runOnce(env: EngineEnv, now = new Date(), opts: { force?: 
     await readReplies(ctx);
     await checkCalendar(ctx, !!opts.force);
     await resumePaused(now);
+    await pullLists(ctx);
     await prepare(ctx, cap);
     await handResearch(ctx, opts.origin ?? null);
     await draftNext(ctx);

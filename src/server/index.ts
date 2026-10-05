@@ -14,7 +14,10 @@ import {
   type Step, type Touch,
 } from "./store.js";
 import { crmAppOf, ensureScheduled, runAndBook, scheduleRun, windowOf, type EngineEnv } from "./engine.js";
-import { connectionStatus, contactApps, crmContactsPage, gmailSignature, mailFor, mailboxes, whatWeSell, workspaceAgents } from "./integrations.js";
+import {
+  connectionStatus, contactApps, crmContactsPage, dropListDemand, gmailSignature, leadApps, listsOf, mailFor, mailboxes, setListDemand, whatWeSell,
+  workspaceAgents,
+} from "./integrations.js";
 
 // In production Clawnify injects the CREDENTIALS broker binding, CLAWNIFY_ORG_ID
 // and the org token (CLAWNIFY_TOKEN: the platform queue, the model endpoint and
@@ -85,6 +88,12 @@ const CampaignSchema = z.object({
   stop_company: z.boolean().openapi({ description: "A reply or a booked meeting from anyone at a company stops everyone there" }),
   signature_id: z.string().nullable().openapi({ description: "First emails: null = the workspace default, 'none' = no signature, else a signature id" }),
   reply_signature_id: z.string().nullable().openapi({ description: "Follow-ups: the same" }),
+  source: z.object({
+    app_id: z.string(), list_id: z.string(), list_name: z.string(),
+    daily: z.number().int().openapi({ description: "New people a day from the list, at most" }),
+    per_company: z.number().int().openapi({ description: "People per company in this campaign, at most" }),
+    checked_at: z.string().nullable(), error: z.string().nullable(),
+  }).nullable().openapi({ description: "A list in another app of the workspace (OpenProspector) that new people come from, every day" }),
   people: z.number().int(),
   live: z.number().int().openapi({ description: "People still being written to" }),
   reached: z.number().int().openapi({ description: "People who got at least one email" }),
@@ -174,6 +183,12 @@ function campaignView(r: CampaignRow) {
   return {
     id: r.id, name: r.name, angle: r.angle, status: r.status, stop_company: !!r.stop_company,
     signature_id: r.signature_id, reply_signature_id: r.reply_signature_id,
+    source: r.source_list_id && r.source_app_id
+      ? {
+        app_id: r.source_app_id, list_id: r.source_list_id, list_name: r.source_list_name ?? "", daily: r.source_daily,
+        per_company: r.source_per_company, checked_at: r.source_checked_at, error: r.source_error,
+      }
+      : null,
     people: r.people, live: r.live, reached: r.reached, sent: r.sent, replied: r.replied, meetings: r.meetings, bounced: r.bounced,
     created_at: r.created_at,
   };
@@ -469,7 +484,21 @@ const getCampaign = createRoute({
   summary: "A campaign with its steps and numbers",
   request: { params: z.object({ id: z.string() }) },
   responses: {
-    200: { description: "The campaign", content: { "application/json": { schema: z.object({ campaign: CampaignSchema, steps: z.array(StepSchema) }) } } },
+    200: {
+      description: "The campaign",
+      content: {
+        "application/json": {
+          schema: z.object({
+            campaign: CampaignSchema,
+            steps: z.array(StepSchema),
+            source_activity: z.object({
+              taken_today: z.number().int().openapi({ description: "People taken from the list today (the workspace's time zone)" }),
+              recent: z.array(z.object({ email: z.string().nullable(), outcome: z.enum(["enrolled", "skipped"]), reason: z.string().nullable(), taken_at: z.string() })),
+            }),
+          }),
+        },
+      },
+    },
     404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
   },
 });
@@ -478,7 +507,19 @@ app.openapi(getCampaign, async (c) => {
   const { id } = c.req.valid("param");
   const row = await campaignById(id);
   if (!row) return c.json({ error: "No such campaign" }, 404);
-  return c.json({ campaign: campaignView(row), steps: (await stepsOf(id)).map(stepView) }, 200);
+  const s = await getSettings();
+  const since = dayStart(new Date(), s.timezone).toISOString();
+  const today = row.source_list_id
+    ? (await get<{ n: number }>("SELECT COUNT(*) AS n FROM source_taken WHERE campaign_id = ? AND outcome = 'enrolled' AND taken_at >= ?", [id, since]))?.n ?? 0
+    : 0;
+  const recent = row.source_list_id
+    ? await query<{ email: string | null; outcome: "enrolled" | "skipped"; reason: string | null; taken_at: string }>(
+      `SELECT p.email, st.outcome, st.reason, st.taken_at FROM source_taken st LEFT JOIN people p ON p.id = st.person_id
+        WHERE st.campaign_id = ? ORDER BY st.taken_at DESC LIMIT 10`,
+      [id],
+    )
+    : [];
+  return c.json({ campaign: campaignView(row), steps: (await stepsOf(id)).map(stepView), source_activity: { taken_today: today, recent } }, 200);
 });
 
 // Name, angle, the company rule, and its state: draft → active ⇄ paused → archived.
@@ -514,6 +555,33 @@ app.patch("/api/campaigns/:id", async (c) => {
       sets.push(`${key} = ?`);
       params.push(v);
     }
+    // The list it takes new people from: { app_id, list_id, daily?, per_company? }, or null to stop.
+    let demand: { app: string; list: string; daily: number } | null | undefined;
+    if (b.source !== undefined) {
+      if (b.source === null) {
+        sets.push("source_app_id = NULL, source_list_id = NULL, source_list_name = NULL, source_checked_at = NULL, source_error = NULL");
+        demand = null;
+      } else {
+        const src = b.source as Record<string, unknown>;
+        const appId = typeof src.app_id === "string" ? src.app_id : row.source_app_id;
+        const listId = typeof src.list_id === "string" ? src.list_id : row.source_list_id;
+        if (!appId || !listId) return c.json({ error: "source needs app_id and list_id" }, 400);
+        const daily = src.daily === undefined ? row.source_daily : src.daily;
+        const perCompany = src.per_company === undefined ? row.source_per_company : src.per_company;
+        if (typeof daily !== "number" || !Number.isInteger(daily) || daily < 1 || daily > 200) return c.json({ error: "daily is a whole number from 1 to 200" }, 400);
+        if (typeof perCompany !== "number" || !Number.isInteger(perCompany) || perCompany < 1 || perCompany > 20) return c.json({ error: "per_company is a whole number from 1 to 20" }, 400);
+        let name = row.source_list_name ?? "";
+        if (appId !== row.source_app_id || listId !== row.source_list_id) {
+          if (!(await leadApps(c.env, originOf(c))).some((a) => a.id === appId)) return c.json({ error: "That app doesn't keep lists of people in this workspace" }, 400);
+          const list = (await listsOf(c.env, appId)).find((l) => l.id === listId);
+          if (!list) return c.json({ error: "No such list in that app" }, 400);
+          name = list.name;
+        }
+        sets.push("source_app_id = ?, source_list_id = ?, source_list_name = ?, source_daily = ?, source_per_company = ?, source_checked_at = NULL, source_error = NULL");
+        params.push(appId, listId, name, daily, perCompany);
+        demand = { app: appId, list: listId, daily };
+      }
+    }
     if (b.status !== undefined) {
       const to = b.status;
       const allowed: Record<string, string[]> = { draft: ["active", "archived"], active: ["paused", "archived"], paused: ["active", "archived"], archived: [] };
@@ -525,12 +593,42 @@ app.patch("/api/campaigns/:id", async (c) => {
       params.push(to);
     }
     if (sets.length) await run(`UPDATE campaigns SET ${sets.join(", ")}, updated_at = datetime('now') WHERE id = ?`, [...params, id]);
+    // The list sizes its email lookups by what its campaigns take; an archived campaign takes nothing.
+    if (b.status === "archived" && row.source_list_id) demand = null;
+    if (demand !== undefined) {
+      const key = `opensequence:${id}`;
+      const moved = row.source_app_id && row.source_list_id && (!demand || demand.app !== row.source_app_id || demand.list !== row.source_list_id);
+      try {
+        if (moved) await dropListDemand(c.env, row.source_app_id!, row.source_list_id!, key);
+        if (demand) await setListDemand(c.env, demand.app, demand.list, key, `OpenSequence: ${b.name ?? row.name}`, demand.daily);
+      } catch (e) {
+        if (demand) await run("UPDATE campaigns SET source_error = ? WHERE id = ?", [`Couldn't tell the list this campaign's daily number: ${(e as Error).message}`.slice(0, 300), id]);
+      }
+      if (demand) await kick(c);
+    }
     if (b.status === "archived") {
       const live = await query<{ id: string }>("SELECT id FROM enrollments WHERE campaign_id = ? AND status IN ('active', 'paused')", [id]);
       await endEnrollments(live.map((r) => r.id), "stopped", "The campaign was archived");
     }
     if (b.status === "active") await kick(c);
     return c.json({ campaign: campaignView((await campaignById(id))!) }, 200);
+  } catch (err) {
+    return fail(c, err);
+  }
+});
+
+// The lists in the workspace that campaigns can take new people from.
+app.get("/api/sources", async (c) => {
+  try {
+    const apps = await leadApps(c.env, originOf(c));
+    const out = await Promise.all(apps.map(async (a) => {
+      try {
+        return { id: a.id, name: a.name, lists: await listsOf(c.env, a.id), error: null };
+      } catch (e) {
+        return { id: a.id, name: a.name, lists: [], error: (e as Error).message };
+      }
+    }));
+    return c.json({ apps: out }, 200);
   } catch (err) {
     return fail(c, err);
   }

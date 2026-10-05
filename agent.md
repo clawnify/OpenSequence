@@ -43,6 +43,11 @@ a pick, work the queue when you are asked to:
 
 ## Adding people
 
+A campaign can also fill itself from an OpenProspector list (`PATCH /api/campaigns/{id}`
+`{ "source": { "app_id", "list_id", "daily", "per_company" } }`, or `null` to stop; the
+lists are at `GET /api/sources`). Set one up when the person asks for a campaign that keeps
+filling; the app takes the people itself, each hour, up to the number a day.
+
 - `POST /api/people` `{ "people": [{ "email", "first_name", "last_name", "title", "company", "linkedin_url", "notes" }], "campaign_id": "..." }`,
   up to 500 at a time. An address already here is filled in, not duplicated.
   Put the evidence in `notes`, with links: the writer works from it.

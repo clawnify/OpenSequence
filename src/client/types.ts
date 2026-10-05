@@ -49,6 +49,8 @@ export interface Campaign {
   /** null: the workspace default; "none": no signature; else a signature's id. */
   signature_id: string | null;
   reply_signature_id: string | null;
+  /** A list in another app of the workspace (OpenProspector) that new people come from, every day. */
+  source: CampaignSource | null;
   people: number;
   live: number;
   reached: number;
@@ -217,3 +219,30 @@ export interface AddPeopleResult {
 }
 
 export type Page<K extends string, T> = { [k in K]: T[] } & { total: number; page: number; limit: number };
+
+export interface CampaignSource {
+  app_id: string;
+  list_id: string;
+  list_name: string;
+  /** New people a day from the list, at most. */
+  daily: number;
+  /** People per company in the campaign, at most. */
+  per_company: number;
+  checked_at: string | null;
+  error: string | null;
+}
+
+/** What a campaign's list gave: today's count, and the latest people taken or skipped. */
+export interface SourceActivity {
+  taken_today: number;
+  recent: Array<{ email: string | null; outcome: "enrolled" | "skipped"; reason: string | null; taken_at: string }>;
+}
+
+/** A list of people in another app of the workspace. */
+export interface PeopleList {
+  id: string;
+  name: string;
+  refresh: string;
+  member_count: number;
+  verified_count: number;
+}
