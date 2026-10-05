@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, ExternalLink, Linkedin, Phone, RefreshCw, Search, Sparkles, Undo2 } from "lucide-react";
+import { Check, ExternalLink, Linkedin, PenLine, Phone, RefreshCw, Search, Sparkles, Undo2 } from "lucide-react";
 import { openChat, useChatContext, useHasChat } from "@clawnify/app/client";
 import { api } from "@/api";
 import { useApp } from "@/context";
@@ -242,7 +242,7 @@ function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (i
           <span className="truncate">{personName(t.person)} &lt;{t.person.email}&gt;</span>
           {t.written_by && (
             <span className="ml-auto flex shrink-0 items-center gap-1 text-muted-foreground">
-              {t.written_by === "agent" ? <Search className="size-3.5" /> : <Sparkles className="size-3.5" />}
+              {t.written_by === "agent" ? <Search className="size-3.5" /> : t.written_by === "ai" ? <Sparkles className="size-3.5" /> : <PenLine className="size-3.5" />}
               {t.written_by === "agent" ? "Researched by the agent" : t.written_by === "ai" ? "Written by AI" : "Written by a person"}
               {t.edited && " · edited"}
             </span>

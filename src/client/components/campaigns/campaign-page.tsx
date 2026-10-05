@@ -258,11 +258,11 @@ function CampaignPeople({ campaign, navigate, onChanged }: { campaign: Campaign;
           <Table grid>
             <TableHeader>
               <TableRow>
-                <TableHead pinned width={240}>Person</TableHead>
-                <TableHead width={300}>Status</TableHead>
-                <TableHead width={90}>Step</TableHead>
-                <TableHead width={140}>Next</TableHead>
-                <TableHead width={170} className="text-right"><span className="sr-only">Actions</span></TableHead>
+                <TableHead pinned width={200}>Person</TableHead>
+                <TableHead width={260}>Status</TableHead>
+                <TableHead width={64}>Step</TableHead>
+                <TableHead width={120}>Next</TableHead>
+                <TableHead width={180} className="text-right"><span className="sr-only">Actions</span></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
