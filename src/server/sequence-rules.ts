@@ -652,7 +652,7 @@ export function researchInstruction(app: { id: string | null; url: string | null
     : `call_app_api on the OpenSequence app${app.url ? ` at ${app.url}` : ""}`;
   return [
     `OpenSequence has ${count === 1 ? "an email" : `${count} emails`} waiting for your research; a person approves each one before it is sent. The payload lists the touch ids. For each one, through ${via}:`,
-    "1. GET /api/touches/{id}: the person, the campaign, the step's instructions and the thread so far. A review_note means a person sent your earlier draft back: do what it says. Read the campaign's angle with GET /api/campaigns/{campaign.id}.",
+    "1. GET /api/touches/{id}: the person, the campaign, the step's instructions, what we sell (what_we_sell) and the thread so far. A review_note means a person sent your earlier draft back: do what it says. Read the campaign's angle with GET /api/campaigns/{campaign.id}.",
     "2. Research the person and their company: their website, recent news, job posts, their LinkedIn profile. Find one or two specific facts you can link to that connect to the angle. Leave out anything you can't source.",
     "3. Write the email: plain text, under 120 words, greeting them by first name. No signature and no opt-out line (both are added when it goes out), and never a placeholder. When starts_thread is true it needs a short subject.",
     '4. Hand it in: PUT /api/touches/{id}/draft { "subject", "body", "rationale": "why this angle, what you left out", "sources": [{ "title", "url", "note" }] }. A 409 means it no longer needs you: move on.',

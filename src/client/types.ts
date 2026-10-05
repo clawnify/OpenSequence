@@ -195,6 +195,9 @@ export interface SettingsView {
   /** The workspace's agents, for the research pick. */
   agents: Array<{ id: string; name: string; status: string }>;
   agents_error: string | null;
+  /** The Company Knowledge document pinned as "What you sell", used when the field is empty. */
+  about_source: { title: string; version: number; url: string } | null;
+  about_source_error: string | null;
   sending: Sending;
   live_threads: number;
   can_configure: boolean;

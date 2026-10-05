@@ -14,7 +14,7 @@ import {
   type Step, type Touch,
 } from "./store.js";
 import { crmAppOf, ensureScheduled, runAndBook, scheduleRun, windowOf, type EngineEnv } from "./engine.js";
-import { connectionStatus, contactApps, crmContactsPage, gmailSignature, mailFor, mailboxes, workspaceAgents } from "./integrations.js";
+import { connectionStatus, contactApps, crmContactsPage, gmailSignature, mailFor, mailboxes, whatWeSell, workspaceAgents } from "./integrations.js";
 
 // In production Clawnify injects the CREDENTIALS broker binding, CLAWNIFY_ORG_ID
 // and the org token (CLAWNIFY_TOKEN: the platform queue, the model endpoint and
@@ -295,7 +295,10 @@ app.get("/api/overview", async (c) => {
     return c.json({
       counts: await counts(),
       sending: await sendingView(s),
-      ready: { mailbox: !!s.mailbox, about: !!s.about.trim() },
+      ready: {
+        mailbox: !!s.mailbox,
+        about: !!s.about.trim() || (await whatWeSell(c.env, s.about).then((r) => !!r.text, () => true)),
+      },
       crm: !!crmAppOf(c.env, s),
       can_approve: isPerson(c),
       footer: { opt_out: s.opt_out },
@@ -935,6 +938,7 @@ const getTouch = createRoute({
             thread: z.array(z.object({ position: z.number().int(), subject: z.string().nullable(), body: z.string(), sent_at: z.string() })),
             replies: z.array(z.object({ kind: z.string(), intent: z.string().nullable(), summary: z.string().nullable(), excerpt: z.string(), received_at: z.string() })),
             signature: z.string().openapi({ description: "The signature this email gets when it goes out: plain text or HTML" }),
+            what_we_sell: z.string().openapi({ description: "What we sell, as the writer should use it: Settings, or the org's Company Knowledge document when Settings leaves it empty" }),
           }),
         },
       },
@@ -958,7 +962,8 @@ app.openapi(getTouch, async (c) => {
   const view = touchView(t);
   const campaign = await get<{ signature_id: string | null; reply_signature_id: string | null }>("SELECT signature_id, reply_signature_id FROM campaigns WHERE id = ?", [t.campaign_id]);
   const signature = signatureFor(view.starts_thread ? "first" : "reply", campaign ?? { signature_id: null, reply_signature_id: null }, await getSettings(), await signatureBodies());
-  return c.json({ touch: view, thread, replies, signature }, 200);
+  const sold = await whatWeSell(c.env, (await getSettings()).about).catch(() => ({ text: "" }));
+  return c.json({ touch: view, thread, replies, signature, what_we_sell: sold.text }, 200);
 });
 
 function cleanSources(v: unknown): Array<{ title: string; url: string; note: string }> | { error: string } {
@@ -1224,11 +1229,12 @@ app.post("/api/replies/:id/resume", async (c) => {
 
 async function settingsView(c: C) {
   const s = await getSettings();
-  const [boxes, status, apps, agents] = await Promise.all([
+  const [boxes, status, apps, agents, sold] = await Promise.all([
     mailboxes(c.env).catch(() => []),
     connectionStatus(c.env),
     contactApps(c.env, originOf(c)),
     workspaceAgents(c.env).then((list) => ({ list, error: null }), (e: Error) => ({ list: [], error: e.message })),
+    whatWeSell(c.env, "").then((r) => ({ document: r.document, error: null }), (e: Error) => ({ document: null, error: e.message })),
   ]);
   return {
     settings: {
@@ -1240,6 +1246,9 @@ async function settingsView(c: C) {
     },
     agents: agents.list,
     agents_error: agents.error,
+    // The Company Knowledge document pinned as "What you sell": used whenever the field is empty.
+    about_source: sold.document ? { title: sold.document.title, version: sold.document.version, url: sold.document.url } : null,
+    about_source_error: sold.error,
     mailboxes: boxes,
     signatures: (await listSignatures()).map((x) => ({ id: x.id, name: x.name, body: x.body })),
     connections: status,

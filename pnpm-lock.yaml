@@ -20,6 +20,9 @@ importers:
       '@clawnify/db':
         specifier: ^0.4.2
         version: 0.4.3(@cloudflare/workers-types@4.20260702.1)
+      '@clawnify/knowledge':
+        specifier: ^0.1.0
+        version: 0.1.0
       '@clawnify/queue':
         specifier: ^0.1.1
         version: 0.1.1
@@ -226,6 +229,9 @@ packages:
 
   '@clawnify/integrations@0.4.0':
     resolution: {integrity: sha512-epX7r9VHczmjHJuegsn1ogRM9SG8CsYLsyF6hfxN3uV4nDYjdWazNingZnAgOI+ynVj0ZLV8x2rUnNoUUnSuQw==}
+
+  '@clawnify/knowledge@0.1.0':
+    resolution: {integrity: sha512-WOHIfXB2mx7Iu11u0FzkaQSzNz7APxjpkKDfVw16BsdlEXewcUtWgg+VEx5wcciJzfbnrCrCRCvYtMzb3gHeWA==}
 
   '@clawnify/queue@0.1.1':
     resolution: {integrity: sha512-6gfaz4B3rVVFWMB0IjJ0mt3ausETXpiWodRqShMBTRwVtNyCXJ4FO4/f3qc/TYtnA9ZZBPVeBLjbzg5nTqvULw==}
@@ -2299,6 +2305,8 @@ snapshots:
       - sqlite3
 
   '@clawnify/integrations@0.4.0': {}
+
+  '@clawnify/knowledge@0.1.0': {}
 
   '@clawnify/queue@0.1.1': {}
 

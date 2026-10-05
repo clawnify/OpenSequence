@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Pencil, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { api } from "@/api";
 import { useApp } from "@/context";
@@ -150,7 +150,10 @@ export function SettingsPage() {
           </Section>
 
           <Section title="Writing" description="Every draft starts from what you sell and the campaign's angle. The signature and the opt-out line are added under every email when it goes out.">
-            <TextSetting label="What you sell" rows={3} max={1000} value={s.about} disabled={!can} placeholder="e.g. Site management software for building firms: permits, planning and photos in one place." onSave={(t) => void save({ about: t })} />
+            <TextSetting label="What you sell" rows={3} max={1000} value={s.about} disabled={!can}
+              placeholder={v.about_source ? `Empty: drafts use “${v.about_source.title}” from Company Knowledge.` : "e.g. Site management software for building firms: permits, planning and photos in one place."}
+              hint={<AboutSource view={v} filled={!!s.about.trim()} />}
+              onSave={(t) => void save({ about: t })} />
 
             <TextSetting label="Opt-out line" rows={2} max={300} value={s.opt_out} disabled={!can} onSave={(t) => void save({ opt_out: t })}
               hint="Required, in any words you like: people answer in their own, and the AI reads every reply. Anyone who asks you to stop is never emailed again; a short answer that might mean it is flagged on Replies for you to decide." />
@@ -181,6 +184,19 @@ export function SettingsPage() {
       </div>
     </>
   );
+}
+
+/** Where "What you sell" comes from: this field, or the org's Company Knowledge document when it's empty. */
+function AboutSource({ view: v, filled }: { view: SettingsView; filled: boolean }) {
+  const doc = v.about_source;
+  const link = doc && (
+    <a href={doc.url} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">{doc.title} v{doc.version}</a>
+  );
+  if (doc && filled) return <>Filled in, this wins over {link} in Company Knowledge. Clear it to use the document.</>;
+  if (doc) return <>From Company Knowledge: {link}. Write here to use different words in this app.</>;
+  if (v.about_source_error) return <>Company Knowledge can't be read right now ({v.about_source_error}).</>;
+  if (filled) return null;
+  return <>Or pin a document as “What you sell” in Clawnify, under Settings, Brand, and leave this empty.</>;
 }
 
 /** How an agent's state reads next to its name: nothing when it can take work. */
@@ -324,7 +340,7 @@ function SignaturesSection({ view, disabled, onSaveDefaults, onChanged }: {
 }
 
 function TextSetting({ label, value, onSave, rows, max, disabled, placeholder, hint }: {
-  label: string; value: string; onSave: (v: string) => void; rows: number; max: number; disabled?: boolean; placeholder?: string; hint?: string;
+  label: string; value: string; onSave: (v: string) => void; rows: number; max: number; disabled?: boolean; placeholder?: string; hint?: ReactNode;
 }) {
   const [text, setText] = useState(value);
   useEffect(() => setText(value), [value]);

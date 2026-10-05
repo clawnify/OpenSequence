@@ -27,9 +27,9 @@ this work itself: a task with up to 10 touch ids and these same steps. Without
 a pick, work the queue when you are asked to:
 
 1. `GET /api/touches?status=research` lists drafts waiting for research (paged).
-2. For each one, `GET /api/touches/{id}`: the person, the step's instructions
-   and the thread so far. Read the campaign's angle with
-   `GET /api/campaigns/{campaign.id}`.
+2. For each one, `GET /api/touches/{id}`: the person, the step's instructions,
+   what we sell (`what_we_sell`) and the thread so far. Read the campaign's
+   angle with `GET /api/campaigns/{campaign.id}`.
 3. Research the person and their company: their website, recent news, job
    posts, their LinkedIn profile. Find one or two specific facts you can link
    to, that connect to the angle. Skip anything you can't source.

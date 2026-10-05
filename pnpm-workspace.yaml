@@ -11,3 +11,4 @@ minimumReleaseAgeExclude:
   - '@clawnify/app'
   - '@clawnify/connections'
   - '@clawnify/services'
+  - '@clawnify/knowledge'

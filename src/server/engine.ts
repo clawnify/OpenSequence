@@ -19,7 +19,7 @@ import { bookableAt } from "./jobs.js";
 import { complete, ModelError, type AiEnv } from "./model.js";
 import {
   calendarPage, calendarRun, crmContactFor, crmNote, handToAgent, mailFor, readMessage, readThread, searchMail, selfAppId, sendNew,
-  sendReply, type Mail, type PlatformEnv,
+  sendReply, whatWeSell, type Mail, type PlatformEnv,
 } from "./integrations.js";
 import {
   DAY_MS, MINUTE_MS, PREPARE_AHEAD_MS, addressOf, addressesIn, bookedWith, coerceDraft, coerceReading, companyDomain,
@@ -494,6 +494,21 @@ async function draftNext(ctx: Ctx): Promise<void> {
       ORDER BY e.due_at, t.created_at LIMIT ?`,
     [MAX_ATTEMPTS, DRAFTS_PER_RUN + 1],
   );
+  if (!rows.length) return;
+  // What we sell, once per run. When it lives in Company Knowledge and that
+  // can't be read right now, the drafts wait for the next run rather than
+  // being written without it; their attempts aren't spent.
+  let about: string;
+  try {
+    about = (await whatWeSell(ctx.env, ctx.s.about)).text;
+  } catch (e) {
+    const why = `Waiting for "What you sell" from Company Knowledge: ${(e as Error).message}`.slice(0, 300);
+    await run(
+      `UPDATE touches SET error = ?, updated_at = datetime('now') WHERE id IN (${inList(Math.min(rows.length, DRAFTS_PER_RUN))})`,
+      [why, ...rows.slice(0, DRAFTS_PER_RUN).map((t) => t.id)],
+    );
+    return;
+  }
   for (const [i, t] of rows.entries()) {
     if (i >= DRAFTS_PER_RUN || Date.now() > ctx.deadline) {
       ctx.more = true;
@@ -506,7 +521,7 @@ async function draftNext(ctx: Ctx): Promise<void> {
     const sent = await sentOn(t.enrollment_id);
     const needsSubject = !t.thread_id && !sent.length;
     const prompt = draftPrompt({
-      about: ctx.s.about,
+      about,
       campaign,
       step: { position: t.position, total: t.total, instructions: step?.instructions ?? "" },
       person,

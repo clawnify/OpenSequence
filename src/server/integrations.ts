@@ -6,6 +6,7 @@
 // Composio catalogue on 2026-10-05.
 
 import { createAgents } from "@clawnify/agents";
+import { offering, type OrgDocument } from "@clawnify/knowledge";
 import { accounts, connect, describe, type ConnectionsEnv } from "@clawnify/connections";
 import type { CalendarEvent, GmailMessage } from "./sequence-rules.js";
 import { normaliseEmail } from "./sequence-rules.js";
@@ -181,6 +182,21 @@ export async function connectionStatus(env: ConnectionsEnv): Promise<{ mail: boo
   } catch {
     return { mail: false, calendar: false };
   }
+}
+
+// ── What we sell ───────────────────────────────────────────────────
+
+/**
+ * What we sell: the app's own field when it is filled in, else the Company
+ * Knowledge document the org pinned as "What you sell". Read when it is needed
+ * and never copied into the database, because a copy goes stale. An org that
+ * pinned nothing (or an app outside Clawnify) reads as empty; a call that
+ * fails throws, so "not set" and "can't be read right now" stay apart.
+ */
+export async function whatWeSell(env: PlatformEnv, field: string): Promise<{ text: string; document: OrgDocument | null }> {
+  if (field.trim()) return { text: field.trim(), document: null };
+  const document = await offering(env);
+  return { text: document?.body.trim() ?? "", document };
 }
 
 // ── A CRM in the same workspace ────────────────────────────────────
