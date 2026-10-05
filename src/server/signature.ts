@@ -53,6 +53,11 @@ export async function sanitizeSignature(html: string): Promise<string> {
             (attr !== "style" || !UNSAFE_STYLE.test(v));
           if (!keep) el.removeAttribute(name);
         }
+        // An image left without a safe address would show as a broken one.
+        if (tag === "img" && !el.getAttribute("src")) {
+          el.remove();
+          return;
+        }
         if (tag === "a" && el.getAttribute("href")) {
           el.setAttribute("target", "_blank");
           el.setAttribute("rel", "noopener noreferrer");

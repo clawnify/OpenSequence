@@ -16,7 +16,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AddPeopleDialog } from "./add-people-dialog";
-import type { Campaign, CampaignPerson, Channel, EnrollmentStatus, Page, Step, Writer } from "@/types";
+import type { Campaign, CampaignPerson, Channel, EnrollmentStatus, Page, Signature, Step, Writer } from "@/types";
 
 const CHANNELS: Channel[] = ["email", "call", "linkedin", "task"];
 const WRITER_OPTIONS: Array<{ value: Writer; label: string; hint: string }> = [
@@ -136,7 +136,35 @@ function About({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record
         <Switch checked={c.stop_company} onChange={(v) => void onSave({ stop_company: v })} label="Stop the whole company" />
         <span className="text-sm">When someone replies or books a meeting, stop writing to everyone else at their company</span>
       </div>
+      <CampaignSignatures campaign={c} onSave={onSave} />
     </section>
+  );
+}
+
+/** Which signature this campaign's first emails and follow-ups get: the workspace default unless it picks one. */
+function CampaignSignatures({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record<string, unknown>) => Promise<void> }) {
+  const data = useLoad<{ signatures: Signature[]; defaults: { signature_id: string | null; reply_signature_id: string | null } }>("/api/signatures?limit=100");
+  if (!data.data) return null;
+  const { signatures, defaults } = data.data;
+  const nameOf = (id: string | null) => (id ? signatures.find((x) => x.id === id)?.name ?? "none" : "none");
+  const options = (fallback: string | null) => [
+    { value: "", label: `Default (${nameOf(fallback)})` },
+    { value: "none", label: "No signature" },
+    ...signatures.map((x) => ({ value: x.id, label: x.name })),
+  ];
+  return (
+    <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+      <label className="flex items-center gap-2 text-sm">
+        Signature on first emails
+        <Picker label="Signature on first emails" className="w-60" value={c.signature_id ?? ""} options={options(defaults.signature_id)}
+          onChange={(v) => void onSave({ signature_id: v || null })} />
+      </label>
+      <label className="flex items-center gap-2 text-sm">
+        on follow-ups
+        <Picker label="Signature on follow-ups" className="w-60" value={c.reply_signature_id ?? ""} options={options(defaults.reply_signature_id)}
+          onChange={(v) => void onSave({ reply_signature_id: v || null })} />
+      </label>
+    </div>
   );
 }
 

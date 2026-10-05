@@ -53,6 +53,11 @@ steps becomes a touch: a draft to approve, an email that went out, a task to do.
   14). A step is `{ "wait_days", "channel": "email" | "call" | "linkedin" | "task", "writer": "research" | "thread", "instructions" }`.
 - Starting it (`PATCH /api/campaigns/{id}` `{ "status": "active" }`) is for when
   the person asks. Nothing is sent until each email is approved anyway.
+- Signatures: a campaign uses the workspace defaults, one for first emails and
+  one for follow-ups. If the person wants others for this campaign, list them
+  with `GET /api/signatures` and pick with `PATCH /api/campaigns/{id}`
+  `{ "signature_id", "reply_signature_id" }` (an id, `"none"`, or `null` for the
+  default). Writing or changing a signature is the person's, in Settings.
 
 ## Replies
 
@@ -70,7 +75,7 @@ steps becomes a touch: a draft to approve, an email that went out, a task to do.
 
 ## Reading failures
 
-- 403 on approve or settings: those are a person's, by design.
+- 403 on approve, settings or signatures: those are a person's, by design.
 - 409 on a draft: the touch isn't waiting for one any more (someone wrote it, or
   the person replied and the step was skipped).
 - Nothing is going out: `GET /api/overview` → `sending.last_error` (no mailbox

@@ -234,7 +234,7 @@ function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (i
     void act(() => api("PATCH", `/api/touches/${t.id}`, t.starts_thread ? { subject, body } : { body }), false);
   };
 
-  const signature = overview?.footer.signature.trim() ?? "";
+  const signature = detail.signature.trim();
   const optOut = overview?.footer.opt_out.trim() ?? "";
 
   return (

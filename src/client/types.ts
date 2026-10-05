@@ -35,7 +35,7 @@ export interface Overview {
   crm: boolean;
   can_approve: boolean;
   /** Added under every email when it is sent. */
-  footer: { signature: string; opt_out: string };
+  footer: { opt_out: string };
 }
 
 export interface Campaign {
@@ -44,6 +44,9 @@ export interface Campaign {
   angle: string;
   status: CampaignStatus;
   stop_company: boolean;
+  /** null: the workspace default; "none": no signature; else a signature's id. */
+  signature_id: string | null;
+  reply_signature_id: string | null;
   people: number;
   live: number;
   reached: number;
@@ -119,6 +122,14 @@ export interface TouchDetail {
   touch: Touch;
   thread: Array<{ position: number; subject: string | null; body: string; sent_at: string }>;
   replies: Array<{ kind: string; intent: Intent | null; summary: string | null; excerpt: string; received_at: string }>;
+  /** The signature this email gets when it goes out: plain text or HTML. */
+  signature: string;
+}
+
+export interface Signature {
+  id: string;
+  name: string;
+  body: string;
 }
 
 export interface Reply {
@@ -158,7 +169,8 @@ export interface SettingsView {
   settings: {
     about: string;
     mailbox: string | null;
-    signature: string;
+    signature_id: string | null;
+    reply_signature_id: string | null;
     opt_out: string;
     daily_cap: number;
     ramp_from: string | null;
@@ -170,6 +182,7 @@ export interface SettingsView {
     crm_in_use: string | null;
   };
   mailboxes: Array<{ address: string; isDefault: boolean }>;
+  signatures: Signature[];
   connections: { mail: boolean; calendar: boolean };
   crm_apps: Array<{ id: string; name: string }>;
   sending: Sending;

@@ -23,11 +23,11 @@ import {
 } from "./integrations.js";
 import {
   DAY_MS, MINUTE_MS, PREPARE_AHEAD_MS, addressOf, addressesIn, bookedWith, coerceDraft, coerceReading, companyDomain,
-  composeEmail, dailyCap, dayStart, draftPrompt, emailDomain, inboundKind, isInbound, localDay, needsOptOutCheck, nextSendAt, normaliseEmail,
+  composeEmail, dailyCap, dayStart, draftPrompt, signatureFor, emailDomain, inboundKind, isInbound, localDay, needsOptOutCheck, nextSendAt, normaliseEmail,
   ownWords, prepareBudget, readingPrompt, type GmailMessage, type Window,
 } from "./sequence-rules.js";
 import {
-  OPEN_TOUCH, advance, endEnrollments, getSettings, isPersonal, parts, personName, skipOpenTouches, stepsOf, stopAround,
+  OPEN_TOUCH, advance, endEnrollments, getSettings, isPersonal, parts, personName, signatureBodies, skipOpenTouches, stepsOf, stopAround,
   stopCompany, unsubscribe, type Enrollment, type Person, type Settings, type Touch,
 } from "./store.js";
 
@@ -604,7 +604,13 @@ async function sendNext(ctx: Ctx, cap: number): Promise<Date | null> {
     await run("UPDATE touches SET status = 'review', error = 'The first email needs a subject' WHERE id = ?", [ready.id]);
     return ctx.now;
   }
-  const out = composeEmail(ready.body ?? "", ctx.s.signature, ctx.s.opt_out);
+  // A first email and a follow-up each take their own signature, as in Gmail.
+  const campaign = await get<{ signature_id: string | null; reply_signature_id: string | null }>(
+    "SELECT signature_id, reply_signature_id FROM campaigns WHERE id = ?",
+    [e.campaign_id],
+  );
+  const signature = signatureFor(e.thread_id ? "reply" : "first", campaign ?? { signature_id: null, reply_signature_id: null }, ctx.s, await signatureBodies());
+  const out = composeEmail(ready.body ?? "", signature, ctx.s.opt_out);
   const body = out.body;
   const claimed = await query<{ id: string }>(
     `UPDATE touches SET status = 'sending', sending_at = ?, sent_subject = ?, sent_body = ?, updated_at = datetime('now')

@@ -494,10 +494,11 @@ export function draftPrompt(ctx: DraftContext): { system: string; user: string }
     ctx.needsSubject
       ? "This email starts a new thread: give it a plain subject of a few words."
       : 'This email replies in an existing thread: "subject" is null.',
-    "The body is plain text in short paragraphs, under 120 words. Greet the person by first name when you have it.",
+    "The body is plain text in short paragraphs, under 120 words. Put the greeting on its own line (Hi Jan,) and leave a blank line after it and between paragraphs.",
+    "Make the point the step's instructions ask for. That point is what this email is for.",
     "No signature, no sign-off name and no unsubscribe line: those are added when it is sent.",
     "Never leave a placeholder such as [Name] or {{company}}. If you lack a fact, write around it.",
-    "Use only what you are given about the person. Do not invent facts, results or names.",
+    "Use only what you are given about the person and about what we sell. Do not invent facts, results, features or names; if you have little to go on, keep it shorter.",
     "Write in the language the campaign's angle and the step's instructions are written in.",
     'In "rationale", say in one or two sentences why this draft, and what you left out.',
   ].join("\n");
@@ -522,6 +523,25 @@ export function draftPrompt(ctx: DraftContext): { system: string; user: string }
   }
   if (ctx.review_note) lines.push("", `A reviewer sent the last draft back with this note: ${ctx.review_note}`);
   return { system, user: lines.join("\n") };
+}
+
+/** A campaign's pick: null means the workspace default, NO_SIGNATURE none. */
+export const NO_SIGNATURE = "none";
+
+/**
+ * The signature an email gets, as in Gmail: a first email and a follow-up
+ * each have their own, the campaign's pick when it made one, else the
+ * workspace default. A signature that no longer exists is no signature.
+ */
+export function signatureFor(
+  kind: "first" | "reply",
+  campaign: { signature_id: string | null; reply_signature_id: string | null },
+  defaults: { signature_id: string | null; reply_signature_id: string | null },
+  bodies: Map<string, string>,
+): string {
+  const pick = kind === "first" ? campaign.signature_id : campaign.reply_signature_id;
+  const id = pick === null ? (kind === "first" ? defaults.signature_id : defaults.reply_signature_id) : pick === NO_SIGNATURE ? null : pick;
+  return id ? bodies.get(id) ?? "" : "";
 }
 
 /** The email as it goes out: the draft, the signature, then the opt-out line. */

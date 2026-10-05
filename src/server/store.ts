@@ -12,7 +12,10 @@ export interface Settings {
   id: number;
   about: string;
   mailbox: string | null;
+  /** Before named signatures: moved into `signatures` on first read. */
   signature: string;
+  signature_id: string | null;
+  reply_signature_id: string | null;
   opt_out: string;
   daily_cap: number;
   ramp_from: string | null;
@@ -39,6 +42,9 @@ export interface Campaign {
   angle: string;
   status: "draft" | "active" | "paused" | "archived";
   stop_company: number;
+  /** null: the workspace default; "none": no signature; else a signature's id. */
+  signature_id: string | null;
+  reply_signature_id: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -140,11 +146,24 @@ export const nowIso = () => new Date().toISOString();
 
 export async function getSettings(): Promise<Settings> {
   await run("INSERT OR IGNORE INTO settings (id) VALUES (1)");
-  return (await get<Settings>("SELECT * FROM settings WHERE id = 1"))!;
+  const s = (await get<Settings>("SELECT * FROM settings WHERE id = 1"))!;
+  // Before named signatures there was one: it becomes "Signature", the default
+  // for first emails and follow-ups. Only the request that clears the old
+  // field creates it, so two at once can't make two.
+  if (s.signature.trim() && !s.signature_id) {
+    const id = crypto.randomUUID();
+    const moved = await run(
+      "UPDATE settings SET signature_id = ?, reply_signature_id = COALESCE(reply_signature_id, ?), signature = '' WHERE id = 1 AND signature = ? AND signature_id IS NULL",
+      [id, id, s.signature],
+    );
+    if (moved.changes === 1) await run("INSERT INTO signatures (id, name, body) VALUES (?, 'Signature', ?)", [id, s.signature]);
+    return (await get<Settings>("SELECT * FROM settings WHERE id = 1"))!;
+  }
+  return s;
 }
 
 const EDITABLE = [
-  "about", "mailbox", "signature", "opt_out", "daily_cap", "ramp_from", "send_from", "send_until",
+  "about", "mailbox", "signature_id", "reply_signature_id", "opt_out", "daily_cap", "ramp_from", "send_from", "send_until",
   "timezone", "weekdays_only", "crm_app_id",
 ] as const;
 export type SettingsPatch = Partial<Pick<Settings, (typeof EDITABLE)[number]>>;
@@ -160,6 +179,32 @@ export async function saveSettings(patch: SettingsPatch): Promise<Settings> {
   }
   if (sets.length) await run(`UPDATE settings SET ${sets.join(", ")}, updated_at = datetime('now') WHERE id = 1`, params);
   return getSettings();
+}
+
+// ── Signatures ─────────────────────────────────────────────────────
+
+export interface Signature {
+  id: string;
+  name: string;
+  body: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export async function listSignatures(): Promise<Signature[]> {
+  return query<Signature>("SELECT * FROM signatures ORDER BY created_at, id");
+}
+
+export async function signatureBodies(): Promise<Map<string, string>> {
+  return new Map((await listSignatures()).map((x) => [x.id, x.body]));
+}
+
+/** Deletes a signature; whatever used it falls back to the default (a campaign) or to none. */
+export async function deleteSignature(id: string): Promise<void> {
+  await run("DELETE FROM signatures WHERE id = ?", [id]);
+  await run("UPDATE settings SET signature_id = CASE WHEN signature_id = ? THEN NULL ELSE signature_id END, reply_signature_id = CASE WHEN reply_signature_id = ? THEN NULL ELSE reply_signature_id END WHERE id = 1", [id, id]);
+  await run("UPDATE campaigns SET signature_id = NULL WHERE signature_id = ?", [id]);
+  await run("UPDATE campaigns SET reply_signature_id = NULL WHERE reply_signature_id = ?", [id]);
 }
 
 // ── People ─────────────────────────────────────────────────────────

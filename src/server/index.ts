@@ -7,9 +7,11 @@ import {
   CHANNELS, WRITERS, dayStart, dailyCap, isDay, isHtml, isTimezone, localDay, minutesOf, nextSendAt, normaliseEmail, validateSteps,
 } from "./sequence-rules.js";
 import { MAX_SIGNATURE, sanitizeSignature } from "./signature.js";
+import { NO_SIGNATURE, signatureFor } from "./sequence-rules.js";
 import {
-  advance, cleanPerson, endEnrollments, enroll, getSettings, parts, saveSettings, skipOpenTouches, stepsOf, unsubscribe,
-  upsertPerson, type Campaign, type Enrollment, type Person, type Settings, type SettingsPatch, type Step, type Touch,
+  advance, cleanPerson, deleteSignature, endEnrollments, enroll, getSettings, listSignatures, parts, saveSettings, signatureBodies,
+  skipOpenTouches, stepsOf, unsubscribe, upsertPerson, type Campaign, type Enrollment, type Person, type Settings, type SettingsPatch,
+  type Step, type Touch,
 } from "./store.js";
 import { crmAppOf, ensureScheduled, runAndBook, scheduleRun, windowOf, type EngineEnv } from "./engine.js";
 import { connectionStatus, contactApps, crmContactsPage, gmailSignature, mailFor, mailboxes } from "./integrations.js";
@@ -81,6 +83,8 @@ const CampaignSchema = z.object({
   angle: z.string().openapi({ description: "Who it writes to and why: frames every draft" }),
   status: z.enum(["draft", "active", "paused", "archived"]),
   stop_company: z.boolean().openapi({ description: "A reply or a booked meeting from anyone at a company stops everyone there" }),
+  signature_id: z.string().nullable().openapi({ description: "First emails: null = the workspace default, 'none' = no signature, else a signature id" }),
+  reply_signature_id: z.string().nullable().openapi({ description: "Follow-ups: the same" }),
   people: z.number().int(),
   live: z.number().int().openapi({ description: "People still being written to" }),
   reached: z.number().int().openapi({ description: "People who got at least one email" }),
@@ -169,6 +173,7 @@ const CAMPAIGN_SELECT = `SELECT c.*,
 function campaignView(r: CampaignRow) {
   return {
     id: r.id, name: r.name, angle: r.angle, status: r.status, stop_company: !!r.stop_company,
+    signature_id: r.signature_id, reply_signature_id: r.reply_signature_id,
     people: r.people, live: r.live, reached: r.reached, sent: r.sent, replied: r.replied, meetings: r.meetings, bounced: r.bounced,
     created_at: r.created_at,
   };
@@ -292,7 +297,7 @@ app.get("/api/overview", async (c) => {
       ready: { mailbox: !!s.mailbox, about: !!s.about.trim() },
       crm: !!crmAppOf(c.env, s),
       can_approve: isPerson(c),
-      footer: { signature: s.signature, opt_out: s.opt_out },
+      footer: { opt_out: s.opt_out },
     }, 200);
   } catch (err) {
     return fail(c, err);
@@ -491,6 +496,15 @@ app.patch("/api/campaigns/:id", async (c) => {
       if (typeof b.stop_company !== "boolean") return c.json({ error: "stop_company must be true or false" }, 400);
       sets.push("stop_company = ?");
       params.push(b.stop_company ? 1 : 0);
+    }
+    for (const key of ["signature_id", "reply_signature_id"] as const) {
+      if (b[key] === undefined) continue;
+      const v = b[key];
+      if (v !== null && v !== NO_SIGNATURE && (typeof v !== "string" || !(await get("SELECT id FROM signatures WHERE id = ?", [v])))) {
+        return c.json({ error: `${key} is null (the default), "none", or a signature's id` }, 400);
+      }
+      sets.push(`${key} = ?`);
+      params.push(v);
     }
     if (b.status !== undefined) {
       const to = b.status;
@@ -915,6 +929,7 @@ const getTouch = createRoute({
             touch: TouchSchema,
             thread: z.array(z.object({ position: z.number().int(), subject: z.string().nullable(), body: z.string(), sent_at: z.string() })),
             replies: z.array(z.object({ kind: z.string(), intent: z.string().nullable(), summary: z.string().nullable(), excerpt: z.string(), received_at: z.string() })),
+            signature: z.string().openapi({ description: "The signature this email gets when it goes out: plain text or HTML" }),
           }),
         },
       },
@@ -935,7 +950,10 @@ app.openapi(getTouch, async (c) => {
     "SELECT kind, intent, summary, excerpt, received_at FROM inbound WHERE enrollment_id = ? ORDER BY received_at",
     [t.enrollment_id],
   );
-  return c.json({ touch: touchView(t), thread, replies }, 200);
+  const view = touchView(t);
+  const campaign = await get<{ signature_id: string | null; reply_signature_id: string | null }>("SELECT signature_id, reply_signature_id FROM campaigns WHERE id = ?", [t.campaign_id]);
+  const signature = signatureFor(view.starts_thread ? "first" : "reply", campaign ?? { signature_id: null, reply_signature_id: null }, await getSettings(), await signatureBodies());
+  return c.json({ touch: view, thread, replies, signature }, 200);
 });
 
 function cleanSources(v: unknown): Array<{ title: string; url: string; note: string }> | { error: string } {
@@ -1207,11 +1225,13 @@ async function settingsView(c: C) {
   ]);
   return {
     settings: {
-      about: s.about, mailbox: s.mailbox, signature: s.signature, opt_out: s.opt_out, daily_cap: s.daily_cap, ramp_from: s.ramp_from,
+      about: s.about, mailbox: s.mailbox, signature_id: s.signature_id, reply_signature_id: s.reply_signature_id,
+      opt_out: s.opt_out, daily_cap: s.daily_cap, ramp_from: s.ramp_from,
       send_from: s.send_from, send_until: s.send_until, timezone: s.timezone, weekdays_only: !!s.weekdays_only,
       crm_app_id: s.crm_app_id, crm_in_use: crmAppOf(c.env, s),
     },
     mailboxes: boxes,
+    signatures: (await listSignatures()).map((x) => ({ id: x.id, name: x.name, body: x.body })),
     connections: status,
     crm_apps: apps.map((a) => ({ id: a.id, name: a.name })),
     sending: await sendingView(s),
@@ -1233,7 +1253,7 @@ app.put("/api/settings", async (c) => {
     if (!isPerson(c)) return c.json({ error: "Only a signed-in person can change where and when email goes out." }, 403);
     const b = await body(c);
     const patch: SettingsPatch = {};
-    const text = (key: "about" | "signature" | "opt_out", max: number, required = false) => {
+    const text = (key: "about" | "opt_out", max: number, required = false) => {
       if (b[key] === undefined) return null;
       const v = cleanText(b[key], key.replace("_", "-"), max, required);
       if (v && typeof v === "object") return v.error;
@@ -1242,13 +1262,14 @@ app.put("/api/settings", async (c) => {
     };
     const bad = text("about", 1000) ?? text("opt_out", 300, true);
     if (bad) return c.json({ error: bad === "opt-out is required" ? "Every email carries an opt-out line: write one" : bad }, 400);
-    if (b.signature !== undefined) {
-      if (typeof b.signature !== "string") return c.json({ error: "signature must be text or HTML" }, 400);
-      // HTML (pasted from Gmail's settings) is cleaned to what a signature needs; plain text is kept as is.
-      const raw = b.signature.replace(/\r\n?/g, "\n").trim();
-      const signature = isHtml(raw) ? await sanitizeSignature(raw) : raw;
-      if (signature.length > MAX_SIGNATURE) return c.json({ error: "The signature is at most 10,000 characters" }, 400);
-      patch.signature = signature;
+    if (b.signature !== undefined) return c.json({ error: "Signatures are named now: change them with /api/signatures, and pick the defaults with signature_id and reply_signature_id" }, 400);
+    for (const key of ["signature_id", "reply_signature_id"] as const) {
+      if (b[key] === undefined) continue;
+      const v = b[key];
+      if (v !== null && (typeof v !== "string" || !(await get("SELECT id FROM signatures WHERE id = ?", [v])))) {
+        return c.json({ error: `${key} is null (no signature) or a signature's id` }, 400);
+      }
+      patch[key] = v as string | null;
     }
     if (b.mailbox !== undefined) {
       if (b.mailbox === null) patch.mailbox = null;
@@ -1298,6 +1319,92 @@ app.put("/api/settings", async (c) => {
   } catch (err) {
     return fail(c, err);
   }
+});
+
+// ── Signatures ─────────────────────────────────────────────────────
+
+const SignatureSchema = z.object({ id: z.string(), name: z.string(), body: z.string().openapi({ description: "Plain text or HTML" }) }).openapi("Signature");
+
+/** A signature's body as saved: HTML cleaned to what a signature needs, plain text kept. */
+async function cleanSignature(v: unknown): Promise<string | { error: string }> {
+  if (typeof v !== "string") return { error: "body must be text or HTML" };
+  const raw = v.replace(/\r\n?/g, "\n").trim();
+  const body = isHtml(raw) ? await sanitizeSignature(raw) : raw;
+  return body.length > MAX_SIGNATURE ? { error: "A signature is at most 10,000 characters" } : body;
+}
+
+const listSignaturesRoute = createRoute({
+  method: "get",
+  path: "/api/signatures",
+  tags: ["Signatures"],
+  summary: "The named signatures. Settings pick a default for first emails and one for follow-ups; a campaign can pick its own",
+  request: { query: PageQuery },
+  responses: {
+    200: {
+      description: "A page of signatures, and the workspace defaults",
+      content: {
+        "application/json": {
+          schema: z.object({
+            signatures: z.array(SignatureSchema),
+            total: z.number().int(),
+            page: z.number().int(),
+            limit: z.number().int(),
+            defaults: z.object({ signature_id: z.string().nullable(), reply_signature_id: z.string().nullable() })
+              .openapi({ description: "The signatures first emails and follow-ups get unless a campaign picks one; null: none" }),
+          }),
+        },
+      },
+    },
+  },
+});
+
+app.openapi(listSignaturesRoute, async (c) => {
+  const { page, limit, offset } = pageParams(c.req.valid("query"));
+  const [all, s] = await Promise.all([listSignatures(), getSettings()]);
+  return c.json({
+    signatures: all.slice(offset, offset + limit).map((x) => ({ id: x.id, name: x.name, body: x.body })),
+    total: all.length, page, limit,
+    defaults: { signature_id: s.signature_id, reply_signature_id: s.reply_signature_id },
+  }, 200);
+});
+
+app.post("/api/signatures", async (c) => {
+  if (!isPerson(c)) return c.json({ error: "Only a signed-in person can change signatures." }, 403);
+  const b = await body(c);
+  const name = typeof b.name === "string" ? b.name.trim().slice(0, 80) : "";
+  if (!name) return c.json({ error: "A signature needs a name" }, 400);
+  const sig = await cleanSignature(b.body ?? "");
+  if (typeof sig !== "string") return c.json(sig, 400);
+  const id = crypto.randomUUID();
+  await run("INSERT INTO signatures (id, name, body) VALUES (?, ?, ?)", [id, name, sig]);
+  return c.json({ signature: { id, name, body: sig } }, 201);
+});
+
+app.patch("/api/signatures/:id", async (c) => {
+  if (!isPerson(c)) return c.json({ error: "Only a signed-in person can change signatures." }, 403);
+  const id = c.req.param("id");
+  if (!(await get("SELECT id FROM signatures WHERE id = ?", [id]))) return c.json({ error: "No such signature" }, 404);
+  const b = await body(c);
+  if (b.name !== undefined) {
+    const name = typeof b.name === "string" ? b.name.trim().slice(0, 80) : "";
+    if (!name) return c.json({ error: "A signature needs a name" }, 400);
+    await run("UPDATE signatures SET name = ?, updated_at = datetime('now') WHERE id = ?", [name, id]);
+  }
+  if (b.body !== undefined) {
+    const sig = await cleanSignature(b.body);
+    if (typeof sig !== "string") return c.json(sig, 400);
+    await run("UPDATE signatures SET body = ?, updated_at = datetime('now') WHERE id = ?", [sig, id]);
+  }
+  const row = (await get<{ id: string; name: string; body: string }>("SELECT id, name, body FROM signatures WHERE id = ?", [id]))!;
+  return c.json({ signature: row }, 200);
+});
+
+app.delete("/api/signatures/:id", async (c) => {
+  if (!isPerson(c)) return c.json({ error: "Only a signed-in person can change signatures." }, 403);
+  const id = c.req.param("id");
+  if (!(await get("SELECT id FROM signatures WHERE id = ?", [id]))) return c.json({ error: "No such signature" }, 404);
+  await deleteSignature(id);
+  return c.json({ ok: true }, 200);
 });
 
 // The signature Gmail adds to new emails from the sending mailbox (or the

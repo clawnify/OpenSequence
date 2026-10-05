@@ -6,7 +6,9 @@ CREATE TABLE IF NOT EXISTS settings (
   id INTEGER PRIMARY KEY,                   -- always 1
   about TEXT NOT NULL DEFAULT '',           -- what we sell, in a sentence: frames every draft
   mailbox TEXT,                             -- the Gmail account emails go out from (its address); nothing is sent until one is picked
-  signature TEXT NOT NULL DEFAULT '',       -- added under every email when it is sent
+  signature TEXT NOT NULL DEFAULT '',       -- before named signatures: moved into `signatures` on first read, then unused
+  signature_id TEXT,                        -- the signature for a first email, unless the campaign picks one; null: none
+  reply_signature_id TEXT,                  -- the signature for a follow-up, unless the campaign picks one; null: none
   opt_out TEXT NOT NULL DEFAULT 'P.S. If this isn''t for you, just say so and I won''t write again.', -- under the signature on every email, never empty; any wording works, the AI reads the replies
   daily_cap INTEGER NOT NULL DEFAULT 30,    -- emails a day, all campaigns together
   ramp_from TEXT,                           -- YYYY-MM-DD a new mailbox started sending: the daily cap climbs from it
@@ -28,6 +30,15 @@ CREATE TABLE IF NOT EXISTS settings (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
+-- Named signatures, as in Gmail: plain text, or HTML cleaned to what a signature needs.
+CREATE TABLE IF NOT EXISTS signatures (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  body TEXT NOT NULL DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
 -- A campaign: who it is for and what it says, and its steps.
 CREATE TABLE IF NOT EXISTS campaigns (
   id TEXT PRIMARY KEY,
@@ -35,6 +46,8 @@ CREATE TABLE IF NOT EXISTS campaigns (
   angle TEXT NOT NULL DEFAULT '',           -- who we write to and why: frames every draft
   status TEXT NOT NULL DEFAULT 'draft',     -- 'draft' | 'active' | 'paused' | 'archived'
   stop_company INTEGER NOT NULL DEFAULT 1,  -- a reply or meeting from anyone at a company stops everyone there
+  signature_id TEXT,                        -- first emails: null = the workspace default, 'none' = no signature, else a signature
+  reply_signature_id TEXT,                  -- follow-ups: the same
   created_by TEXT,
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
