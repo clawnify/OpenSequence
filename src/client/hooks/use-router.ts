@@ -1,42 +1,33 @@
 import { useState, useEffect, useCallback } from "react";
 
-// A list route may carry `record`: the id open in the side panel beside the
-// table (`/contacts?record=<id>`). The record's own path (`/contacts/<id>`) is
-// the full page, so a deep link to a record still lands on the whole record.
-// `view` is the list's named view (absent: its default view). `filters` opens
-// a list pre-filtered (a filter tree, as the API takes it); the list reads it
-// once and drops it from the URL (see useListView).
+export type ReviewTab = "review" | "research" | "drafting" | "todo" | "approved";
+
 export type Route =
-  | { name: "contacts"; record?: string; view?: string; filters?: string }
-  | { name: "contact"; id: string }
-  | { name: "companies"; record?: string; view?: string; filters?: string }
-  | { name: "company"; id: string }
-  | { name: "deals"; record?: string }
-  | { name: "deal"; id: string }
-  | { name: "customers" }
-  | { name: "properties" }
-  | { name: "email-sync" }
-  | { name: "meetings-sync" }
+  | { name: "review"; tab: ReviewTab; touch?: string }
+  | { name: "replies"; show: "open" | "all" }
+  | { name: "campaigns" }
+  | { name: "campaign"; id: string }
+  | { name: "people" }
+  | { name: "person"; id: string }
+  | { name: "settings" }
   | { name: "not-found" };
+
+const TABS: ReviewTab[] = ["review", "research", "drafting", "todo", "approved"];
 
 function parse(pathname: string, search: string): Route {
   const q = new URLSearchParams(search);
-  const record = q.get("record") || undefined;
-  const filters = q.get("filters") ?? undefined;
-  const view = q.get("view") || undefined;
-  if (pathname === "/" || pathname === "/contacts") return { name: "contacts", record, view, filters };
-  const m = pathname.match(/^\/contacts\/([^/]+)$/);
-  if (m) return { name: "contact", id: decodeURIComponent(m[1]) };
-  if (pathname === "/companies") return { name: "companies", record, view, filters };
-  const cm = pathname.match(/^\/companies\/([^/]+)$/);
-  if (cm) return { name: "company", id: decodeURIComponent(cm[1]) };
-  if (pathname === "/deals") return { name: "deals", record };
-  const dm = pathname.match(/^\/deals\/([^/]+)$/);
-  if (dm) return { name: "deal", id: decodeURIComponent(dm[1]) };
-  if (pathname === "/customers") return { name: "customers" };
-  if (pathname === "/settings/properties") return { name: "properties" };
-  if (pathname === "/settings/email") return { name: "email-sync" };
-  if (pathname === "/settings/meetings") return { name: "meetings-sync" };
+  if (pathname === "/" || pathname === "/review") {
+    const tab = TABS.includes(q.get("tab") as ReviewTab) ? (q.get("tab") as ReviewTab) : "review";
+    return { name: "review", tab, touch: q.get("touch") || undefined };
+  }
+  if (pathname === "/replies") return { name: "replies", show: q.get("show") === "all" ? "all" : "open" };
+  if (pathname === "/campaigns") return { name: "campaigns" };
+  const cm = pathname.match(/^\/campaigns\/([^/]+)$/);
+  if (cm) return { name: "campaign", id: decodeURIComponent(cm[1]) };
+  if (pathname === "/people") return { name: "people" };
+  const pm = pathname.match(/^\/people\/([^/]+)$/);
+  if (pm) return { name: "person", id: decodeURIComponent(pm[1]) };
+  if (pathname === "/settings") return { name: "settings" };
   return { name: "not-found" };
 }
 
@@ -53,19 +44,9 @@ export function withQuery(changes: Record<string, string | null>): string {
   return window.location.pathname + (s ? `?${s}` : "");
 }
 
-/** Navigate from anywhere, without the router's `navigate` in hand (a record
- *  chip deep in a table cell). The router hears it as a history change. */
-export function go(to: string): void {
-  if (to === current()) return;
-  window.history.pushState(null, "", to);
-  window.dispatchEvent(new PopStateEvent("popstate"));
-}
-
 export function useRouter() {
   const [path, setPath] = useState<string>(current);
 
-  // `replace` swaps the entry instead of stacking one, so moving the panel
-  // from record to record does not bury the list under a trail of history.
   const navigate = useCallback((to: string, opts?: { replace?: boolean }) => {
     if (to === current()) return;
     if (opts?.replace) window.history.replaceState(null, "", to);
@@ -82,3 +63,5 @@ export function useRouter() {
   const url = new URL(path, window.location.origin);
   return { path, route: parse(url.pathname, url.search), navigate };
 }
+
+export type Navigate = (to: string, opts?: { replace?: boolean }) => void;

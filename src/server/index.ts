@@ -105,6 +105,7 @@ const PersonSchema = z.object({
   crm_contact_id: z.string().nullable(),
   unsubscribed_at: z.string().nullable(),
   bounced_at: z.string().nullable(),
+  created_at: z.string(),
   campaign: z.object({ id: z.string(), name: z.string(), status: z.string(), step: z.number().int(), reason: z.string().nullable() }).nullable()
     .openapi({ description: "Their latest campaign and where they are in it" }),
 }).openapi("Person");
@@ -193,7 +194,7 @@ function personView(r: PersonRow) {
   return {
     id: r.id, email: r.email, first_name: r.first_name, last_name: r.last_name, title: r.title, company: r.company, domain: r.domain,
     linkedin_url: r.linkedin_url, phone: r.phone, notes: r.notes, source: r.source, crm_contact_id: r.crm_contact_id,
-    unsubscribed_at: r.unsubscribed_at, bounced_at: r.bounced_at,
+    unsubscribed_at: r.unsubscribed_at, bounced_at: r.bounced_at, created_at: r.created_at,
     campaign: r.c_id ? { id: r.c_id, name: r.c_name ?? "", status: r.c_status ?? "", step: r.c_step ?? 0, reason: r.c_reason } : null,
   };
 }
@@ -283,7 +284,14 @@ app.get("/api/overview", async (c) => {
   try {
     await ensureScheduled(c.env, originOf(c)).catch(() => undefined);
     const s = await getSettings();
-    return c.json({ counts: await counts(), sending: await sendingView(s), ready: { mailbox: !!s.mailbox, about: !!s.about.trim() } }, 200);
+    return c.json({
+      counts: await counts(),
+      sending: await sendingView(s),
+      ready: { mailbox: !!s.mailbox, about: !!s.about.trim() },
+      crm: !!crmAppOf(c.env, s),
+      can_approve: isPerson(c),
+      footer: { signature: s.signature, opt_out: s.opt_out },
+    }, 200);
   } catch (err) {
     return fail(c, err);
   }
@@ -698,6 +706,7 @@ const PersonInputSchema = z.object({
   linkedin_url: z.string().optional(),
   phone: z.string().optional(),
   notes: z.string().optional().openapi({ description: "Context and evidence for whoever writes to them: what you found and where" }),
+  crm_contact_id: z.string().optional().openapi({ description: "Their contact in the connected CRM, when they come from it" }),
 });
 
 const addPeople = createRoute({
@@ -706,7 +715,7 @@ const addPeople = createRoute({
   tags: ["People"],
   summary: "Add people (up to 500), or fill in the ones already here by email. Optionally put them in a campaign",
   request: {
-    body: { content: { "application/json": { schema: z.object({ people: z.array(PersonInputSchema).min(1).max(500), campaign_id: z.string().optional(), source: z.enum(["manual", "csv", "agent"]).optional() }) } } },
+    body: { content: { "application/json": { schema: z.object({ people: z.array(PersonInputSchema).min(1).max(500), campaign_id: z.string().optional(), source: z.enum(["manual", "csv", "crm", "agent"]).optional() }) } } },
   },
   responses: {
     200: {

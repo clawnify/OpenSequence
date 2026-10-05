@@ -1,6 +1,7 @@
-import { useState, type ReactNode } from "react";
-import { cn, getInitials, categoryClasses } from "../lib/utils";
-import { Badge } from "./ui/badge";
+import { type ReactNode } from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+import { cn, getInitials, categoryClasses, colorClasses, type ColorToken } from "../lib/utils";
+import { Button } from "./ui/button";
 
 /** Initials avatar tinted by a stable category color. */
 export function Avatar({ firstName, lastName, className }: { firstName?: string | null; lastName?: string | null; className?: string }) {
@@ -13,57 +14,30 @@ export function Avatar({ firstName, lastName, className }: { firstName?: string 
   );
 }
 
-/** Company icon: favicon from the domain, letter fallback tinted by name. */
-export function EntityIcon({ name, domain, className }: { name: string; domain?: string | null; className?: string }) {
-  const [err, setErr] = useState(false);
-  const c = categoryClasses(name);
-  // Tolerate a stored value that's a full URL ("https://www.acme.com/x") — the
-  // favicon service needs a bare host ("acme.com").
-  const host = (domain || "").replace(/^https?:\/\//i, "").replace(/\/.*$/, "").replace(/^www\./i, "");
-  if (host && !err) {
-    return (
-      <span className={cn("inline-flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-sm bg-secondary", className)}>
-        <img src={`https://www.google.com/s2/favicons?sz=64&domain=${host}`} alt="" width={16} height={16} onError={() => setErr(true)} />
-      </span>
-    );
-  }
+/** A quiet status label. The tone is the state's, never decoration. */
+export function Pill({ tone, children, className, title }: { tone: ColorToken; children: ReactNode; className?: string; title?: string }) {
+  const c = colorClasses(tone);
   return (
-    <span className={cn("inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-[0.625rem] font-semibold", c.bg, c.text, className)}>
-      {(name?.[0] || "?").toUpperCase()}
+    <span title={title} className={cn("inline-flex h-5 shrink-0 items-center rounded-full px-2 text-[0.75rem] font-medium leading-5", c.bg, c.text, className)}>
+      {children}
     </span>
   );
 }
 
-/** A quiet, fact-style category badge (status, stage, industry). Color = data. */
-export function CategoryBadge({ value, className }: { value?: string | null; className?: string }) {
-  if (!value) return <span className="text-muted-foreground">—</span>;
-  const c = categoryClasses(value);
+/** Sticky page toolbar: the title left (with a quiet detail), actions right. */
+export function PageHeader({ title, meta, children }: { title: ReactNode; meta?: ReactNode; children?: ReactNode }) {
   return (
-    <span
-      title={value}
-      className={cn("inline-block h-5 max-w-[12rem] truncate rounded-full px-2 align-middle text-[0.8125rem] font-medium leading-5 capitalize", c.bg, c.text, className)}
-    >
-      {value}
-    </span>
-  );
-}
-
-/** Sticky page toolbar: heading-1 left (with live count), actions right. */
-export function PageHeader({ title, count, children }: { title: string; count?: number; children?: ReactNode }) {
-  return (
-    <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-border px-6">
-      <div className="flex items-baseline gap-2.5">
-        <h1 className="text-[1.375rem] font-semibold tracking-[-0.01em]">{title}</h1>
-        {count !== undefined && (
-          <span className="tabular text-[0.8125rem] text-muted-foreground">{count} {count === 1 ? "record" : "records"}</span>
-        )}
+    <header className="flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-border px-4 py-2.5 md:px-6">
+      <div className="flex min-w-0 items-baseline gap-2.5">
+        <h1 className="truncate text-[1.375rem] font-semibold tracking-[-0.01em]">{title}</h1>
+        {meta !== undefined && <span className="tabular truncate text-[0.8125rem] text-muted-foreground">{meta}</span>}
       </div>
-      <div className="flex items-center gap-2">{children}</div>
+      <div className="flex flex-wrap items-center gap-2">{children}</div>
     </header>
   );
 }
 
-/** Borderless empty state: one line + an action, floating in whitespace. */
+/** Borderless empty state: one line and at most one action. */
 export function EmptyState({ title, action }: { title: string; action?: ReactNode }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 p-12 text-center">
@@ -73,4 +47,26 @@ export function EmptyState({ title, action }: { title: string; action?: ReactNod
   );
 }
 
-export { Badge };
+/** "26–50 of 120", with previous and next. Hidden when everything fits on one page. */
+export function Pager({ page, limit, total, onPage }: { page: number; limit: number; total: number; onPage: (page: number) => void }) {
+  if (total <= limit) return null;
+  const from = (page - 1) * limit + 1;
+  const to = Math.min(total, page * limit);
+  return (
+    <div className="flex items-center justify-end gap-2 py-3 text-[0.8125rem] text-muted-foreground">
+      <span className="tabular">{from}–{to} of {total}</span>
+      <Button size="icon" variant="ghost" aria-label="Previous page" disabled={page <= 1} onClick={() => onPage(page - 1)}><ChevronLeft /></Button>
+      <Button size="icon" variant="ghost" aria-label="Next page" disabled={to >= total} onClick={() => onPage(page + 1)}><ChevronRight /></Button>
+    </div>
+  );
+}
+
+/** A section heading inside a page. */
+export function SectionTitle({ children, action }: { children: ReactNode; action?: ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <h2 className="text-sm font-medium">{children}</h2>
+      {action}
+    </div>
+  );
+}
