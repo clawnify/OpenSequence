@@ -489,7 +489,7 @@ export interface DraftContext {
   about: string;
   campaign: { name: string; angle: string };
   step: { position: number; total: number; instructions: string };
-  person: { first_name: string; last_name: string; title: string; company: string; notes: string };
+  person: { first_name: string; last_name: string; title: string; company: string; notes: string; inbox?: boolean };
   /** What already went out on this thread, oldest first. Empty for a first email. */
   sent: Array<{ subject: string | null; body: string; sent_at: string }>;
   /** A person's note when they sent an earlier draft back. */
@@ -511,16 +511,20 @@ export function draftPrompt(ctx: DraftContext): { system: string; user: string }
     "Use only what you are given about the person and about what we sell. Do not invent facts, results, features or names; if you have little to go on, keep it shorter.",
     "Write in the language the campaign's angle and the step's instructions are written in.",
     'In "rationale", say in one or two sentences why this draft, and what you left out.',
+    ...(ctx.person.inbox
+      ? ["This goes to the company's shared inbox (info@ and the like), not to a named person: no first name. Greet the team (Hello,), say in a line who it is for, and ask who handles this or to pass it on to whoever does."]
+      : []),
   ].join("\n");
   const p = ctx.person;
+  const name = [p.first_name, p.last_name].filter(Boolean).join(" ");
   const lines = [
     `What we sell: ${ctx.about || "(not set)"}`,
     `Campaign: ${ctx.campaign.name}`,
     `Who we write to and why: ${ctx.campaign.angle || "(not set)"}`,
     `This is step ${ctx.step.position} of ${ctx.step.total}. What it is for: ${ctx.step.instructions || "(no instructions: a short, polite follow-up)"}`,
     "",
-    "The person:",
-    `Name: ${[p.first_name, p.last_name].filter(Boolean).join(" ") || "(unknown)"}`,
+    p.inbox ? "The company's shared inbox:" : "The person:",
+    `Name: ${p.inbox ? (name ? `(a shared inbox; the person it is for: ${name})` : "(a shared inbox: no name)") : name || "(unknown)"}`,
     `Title: ${p.title || "(unknown)"}`,
     `Company: ${p.company || "(unknown)"}`,
     `Notes: ${p.notes || "(none)"}`,
@@ -654,7 +658,7 @@ export function researchInstruction(app: { id: string | null; url: string | null
     `OpenSequence has ${count === 1 ? "an email" : `${count} emails`} waiting for your research; a person approves each one before it is sent. The payload lists the touch ids. For each one, through ${via}:`,
     "1. GET /api/touches/{id}: the person, the campaign, the step's instructions, what we sell (what_we_sell) and the thread so far. A review_note means a person sent your earlier draft back: do what it says. Read the campaign's angle with GET /api/campaigns/{campaign.id}.",
     "2. Research the person and their company: their website, recent news, job posts, their LinkedIn profile. Find one or two specific facts you can link to that connect to the angle. Leave out anything you can't source.",
-    "3. Write the email: plain text, under 120 words, greeting them by first name. No signature and no opt-out line (both are added when it goes out), and never a placeholder. When starts_thread is true it needs a short subject.",
+    "3. Write the email: plain text, under 120 words, greeting them by first name. When person.inbox is true it goes to the company's shared inbox (info@): no name; greet the team and ask who handles this. No signature and no opt-out line (both are added when it goes out), and never a placeholder. When starts_thread is true it needs a short subject.",
     '4. Hand it in: PUT /api/touches/{id}/draft { "subject", "body", "rationale": "why this angle, what you left out", "sources": [{ "title", "url", "note" }] }. A 409 means it no longer needs you: move on.',
     "If you find nothing worth writing about someone, hand in nothing for them and say why in your summary. Never approve or send anything.",
   ].join("\n");
@@ -680,6 +684,39 @@ export interface ListLead {
   phone: string;
 }
 
+// ── A company's inbox ──────────────────────────────────────────────
+
+/**
+ * Local parts that name a company's shared inbox (info@, contact@, kantoor@),
+ * not a person. A campaign writes either to named people or to such inboxes,
+ * never both. OpenProspector keeps the same list in src/shared/inbox.ts:
+ * change both together.
+ */
+export const INBOX_PARTS = [
+  "info", "contact", "contactus", "hello", "hi", "hallo", "office", "general", "mail", "post",
+  "sales", "support", "service", "help", "team", "admin", "enquiries", "inquiries", "reception",
+  "booking", "bookings", "orders",
+  "kantoor", "receptie", "welkom", "administratie",
+  "segreteria", "amministrazione", "ufficio",
+];
+
+/** Whether an address is a company's shared inbox rather than a person's. */
+export function isInbox(email: string | null | undefined): boolean {
+  const e = (email ?? "").trim().toLowerCase();
+  const at = e.lastIndexOf("@");
+  return at > 0 && INBOX_PARTS.includes(e.slice(0, at));
+}
+
+export type Audience = "people" | "inboxes";
+
+/** Why a person can't join a campaign of this audience, or null when they can. */
+export function audienceMismatch(audience: Audience, email: string): string | null {
+  const inbox = isInbox(email);
+  if (audience === "people" && inbox) return "A company inbox: add it to a campaign that writes to company inboxes";
+  if (audience === "inboxes" && !inbox) return "Not a company inbox (info@, contact@): this campaign writes to companies";
+  return null;
+}
+
 /** The person a lead becomes here. Its evidence goes into the notes, which the writer works from. */
 export function leadPerson(l: ListLead): Record<string, string> {
   const [first = "", ...rest] = (l.full_name ?? "").trim().split(/\s+/);
@@ -692,8 +729,11 @@ export function leadPerson(l: ListLead): Record<string, string> {
 
 /**
  * Whether a campaign takes a lead now: not if it took it before, not without a
- * verified email, and not once the company (by email domain; a personal
- * address is no company) already has `cap` people in the campaign.
+ * verified email, not an address of the other kind (a person's in a campaign
+ * written to inboxes, or the reverse), and not once the company (by email
+ * domain; a personal address is no company) already has `cap` people in the
+ * campaign. A company gets one inbox: its info@ and its sales@ reach the same
+ * few people.
  */
 export function leadVerdict(
   l: ListLead,
@@ -701,9 +741,11 @@ export function leadVerdict(
   perCompany: Map<string, number>,
   cap: number,
   domain: string,
-): "take" | "taken" | "unverified" | "company_full" {
+  audience: Audience = "people",
+): "take" | "taken" | "unverified" | "other_audience" | "company_full" {
   if (taken.has(l.id)) return "taken";
   if (!l.email || !l.email_verified) return "unverified";
-  if (domain && (perCompany.get(domain) ?? 0) >= cap) return "company_full";
+  if (audienceMismatch(audience, l.email)) return "other_audience";
+  if (domain && (perCompany.get(domain) ?? 0) >= (audience === "inboxes" ? 1 : cap)) return "company_full";
   return "take";
 }

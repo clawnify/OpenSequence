@@ -136,6 +136,7 @@ export function ReviewPage({ tab, touchId, navigate }: { tab: ReviewTab; touchId
                       <span className="flex items-center gap-2">
                         <span className="truncate text-sm font-medium">{personName(t.person)}</span>
                         {t.person.company && <span className="truncate text-[0.8125rem] text-muted-foreground">{t.person.company}</span>}
+                        {t.person.inbox && <span className="shrink-0 text-[0.75rem] text-muted-foreground">Company inbox</span>}
                       </span>
                       <span className="mt-0.5 block truncate text-[0.8125rem] text-muted-foreground">
                         {t.campaign.name} · {t.channel === "email" ? `email ${t.position}` : CHANNEL_LABEL[t.channel]} of {t.total_steps}
@@ -190,6 +191,7 @@ function PersonHeader({ touch: t, navigate }: { touch: Touch; navigate: Navigate
           {personName(p)}
         </button>
         <div className="text-[0.8125rem] text-muted-foreground">
+          {p.inbox && <span>Company inbox · </span>}
           {[p.title, p.company].filter(Boolean).join(" at ") || p.email}
           {(p.title || p.company) && <span> · {p.email}</span>}
         </div>

@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   angle TEXT NOT NULL DEFAULT '',           -- who we write to and why: frames every draft
   status TEXT NOT NULL DEFAULT 'draft',     -- 'draft' | 'active' | 'paused' | 'archived'
   stop_company INTEGER NOT NULL DEFAULT 1,  -- a reply or meeting from anyone at a company stops everyone there
+  audience TEXT NOT NULL DEFAULT 'people',  -- 'people': named people | 'inboxes': companies' public addresses (info@), with no first name; never both
   signature_id TEXT,                        -- first emails: null = the workspace default, 'none' = no signature, else a signature
   reply_signature_id TEXT,                  -- follow-ups: the same
   source_app_id TEXT,                       -- an app in the workspace that keeps lists of people (OpenProspector); null: none
@@ -186,6 +187,7 @@ CREATE TABLE IF NOT EXISTS source_taken (
   campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
   lead_id TEXT NOT NULL,                    -- the person's id in the list's app
   person_id TEXT,                           -- who it became here
+  email TEXT,                               -- its address in the list, for a lead that became no one here
   outcome TEXT NOT NULL,                    -- 'enrolled' | 'skipped'
   reason TEXT,                              -- why it was skipped
   taken_at TEXT NOT NULL,                   -- ISO time

@@ -36,6 +36,9 @@ a pick, work the queue when you are asked to:
 4. Write the email: plain text, under 120 words, greeting them by first name. No
    signature and no opt-out line (both are added when it goes out), and never a
    placeholder like [Name]. When `starts_thread` is true it needs a short subject.
+   When `person.inbox` is true the email goes to a company's general address
+   (info@, contact@): no first name. Greet the team, say who it is for, and ask
+   who handles it.
 5. Hand it in: `PUT /api/touches/{id}/draft`
    `{ "subject": "...", "body": "...", "rationale": "why this angle, what you left out", "sources": [{ "title": "...", "url": "https://...", "note": "what it says" }] }`.
    It lands in To approve for a person.
@@ -53,11 +56,21 @@ filling; the app takes the people itself, each hour, up to the number a day.
   Put the evidence in `notes`, with links: the writer works from it.
 - People already here: `POST /api/campaigns/{id}/enroll` `{ "emails": [...] }`.
 - Skipped people come back with the reason: asked not to be emailed, bounced,
-  or already in another live campaign. Don't work around it.
+  already in another live campaign, or the wrong kind of address for the
+  campaign (below). Don't work around it.
+
+### Company inboxes (info@, contact@)
+
+A company's general address is not a person. A campaign writes to named people
+(the default) or to such inboxes, never both: set `"audience": "inboxes"` when
+creating it (or with `PATCH`) only when the person asks to write to companies'
+general addresses. Its drafts have no first name, it takes one inbox per
+company, and its list asks for no email lookups, since an inbox comes with its
+address. People carry `inbox: true` when their address is one.
 
 ## Setting up a campaign
 
-- `POST /api/campaigns` `{ "name", "angle", "steps"? }` creates a draft. Without
+- `POST /api/campaigns` `{ "name", "angle", "audience"?, "steps"? }` creates a draft. Without
   steps it gets a researched first email and three follow-ups (days 0, 3, 7 and
   14). A step is `{ "wait_days", "channel": "email" | "call" | "linkedin" | "task", "writer": "research" | "thread", "instructions" }`.
 - Starting it (`PATCH /api/campaigns/{id}` `{ "status": "active" }`) is for when
