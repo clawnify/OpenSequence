@@ -360,14 +360,19 @@ export async function listsOf(env: PlatformEnv, appId: string): Promise<PeopleLi
   return r.lists ?? [];
 }
 
-/** A page of a list's people with a verified email, in the order they joined it. */
+/**
+ * A page of a list's people with a verified email, in the order they joined
+ * it: only named people, or only companies' inboxes. A list that can't tell
+ * them apart answers with both; the campaign checks each address itself.
+ */
 export async function listMembersPage(
   env: PlatformEnv,
   appId: string,
   listId: string,
   page: number,
+  kind: "person" | "inbox" = "person",
 ): Promise<{ members: ListLead[]; total: number; page: number; limit: number }> {
-  const q = new URLSearchParams({ email_verified: "true", page: String(page), limit: "100" });
+  const q = new URLSearchParams({ email_verified: "true", email_kind: kind, page: String(page), limit: "100" });
   return appFetch(env, appId, "GET", `/api/lists/${encodeURIComponent(listId)}/members?${q}`);
 }
 

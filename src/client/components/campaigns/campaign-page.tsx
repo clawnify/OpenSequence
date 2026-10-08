@@ -117,6 +117,11 @@ export function CampaignPage({ id, navigate }: { id: string; navigate: Navigate 
   );
 }
 
+const AUDIENCES = [
+  { value: "people", label: "Named people" },
+  { value: "inboxes", label: "Company inboxes", hint: "info@, contact@: no first name" },
+];
+
 function About({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record<string, unknown>) => Promise<void> }) {
   const [angle, setAngle] = useState(c.angle);
   const [name, setName] = useState(c.name);
@@ -133,6 +138,18 @@ function About({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record
         <Textarea value={angle} rows={3} maxLength={2000} onChange={(e) => setAngle(e.target.value)} onBlur={() => angle !== c.angle && void onSave({ angle })} />
         <span className="text-[0.8125rem] font-normal text-muted-foreground">Every draft in this campaign starts from it.</span>
       </label>
+      <div className="flex flex-col gap-1.5">
+        <label className="flex flex-wrap items-center gap-2 text-sm font-medium">
+          Writes to
+          <Picker label="Writes to" className="w-60" value={c.audience} options={AUDIENCES} onChange={(v) => void onSave({ audience: v })} />
+        </label>
+        <span className="text-[0.8125rem] text-muted-foreground">
+          {c.audience === "inboxes"
+            ? "Companies' general addresses (info@, contact@), one a company. Drafts greet the team and ask who handles it, with no first name."
+            : "Named people. Companies' general addresses (info@, contact@) are left out: give them a campaign of their own."}
+          {c.people > 0 && " A change applies to whoever joins next."}
+        </span>
+      </div>
       <div className="flex items-center gap-3">
         <Switch checked={c.stop_company} onChange={(v) => void onSave({ stop_company: v })} label="Stop the whole company" />
         <span className="text-sm">When someone replies or books a meeting, stop writing to everyone else at their company</span>
@@ -165,25 +182,34 @@ function ListSource({ campaign: c, activity, onSave }: { campaign: Campaign; act
     void onSave({ source: { app_id: appId, list_id: rest.join(":") } });
   };
   const skipped = activity?.recent.filter((r) => r.outcome === "skipped").slice(0, 3) ?? [];
+  const inboxes = c.audience === "inboxes";
   return (
     <div className="flex flex-col gap-2 rounded-md bg-card p-3 shadow-edge">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-2 text-sm">
-        <span>New people from</span>
+        <span>{inboxes ? "New inboxes from" : "New people from"}</span>
         <Picker label="List" className="w-64" disabled={c.status === "archived"} value={current} options={options} searchPlaceholder="Search lists" onChange={pick} />
         {c.source && (
           <>
             <span>up to</span>
-            <NumberField label="New people a day, at most" value={c.source.daily} min={1} max={200} onSave={(n) => void onSave({ source: { daily: n } })} />
+            <NumberField label={inboxes ? "New inboxes a day, at most" : "New people a day, at most"} value={c.source.daily} min={1} max={200} onSave={(n) => void onSave({ source: { daily: n } })} />
             <span>a day, at most</span>
-            <NumberField label="People per company, at most" value={c.source.per_company} min={1} max={20} onSave={(n) => void onSave({ source: { per_company: n } })} />
-            <span>per company</span>
+            {inboxes ? (
+              <span>one per company</span>
+            ) : (
+              <>
+                <NumberField label="People per company, at most" value={c.source.per_company} min={1} max={20} onSave={(n) => void onSave({ source: { per_company: n } })} />
+                <span>per company</span>
+              </>
+            )}
           </>
         )}
       </div>
       {c.source && (
         <p className="text-[0.8125rem] text-muted-foreground">
           Today {activity?.taken_today ?? 0} of {c.source.daily} taken; {c.source.checked_at ? `checked ${ago(c.source.checked_at)}` : "not checked yet"}.
-          {" "}Only people with a verified email, and nobody twice. The list looks up just enough emails for this number.
+          {inboxes
+            ? " Only companies' inboxes, and none twice. Inboxes need no lookups, so this campaign buys none."
+            : " Only people with a verified email, and nobody twice. The list looks up just enough emails for this number."}
         </p>
       )}
       {skipped.map((r) => (

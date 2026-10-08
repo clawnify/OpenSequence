@@ -7,7 +7,7 @@ import {
   CHANNELS, WRITERS, dayStart, dailyCap, isDay, isHtml, isTimezone, localDay, minutesOf, nextSendAt, normaliseEmail, validateSteps,
 } from "./sequence-rules.js";
 import { MAX_SIGNATURE, sanitizeSignature } from "./signature.js";
-import { NO_SIGNATURE, signatureFor } from "./sequence-rules.js";
+import { NO_SIGNATURE, isInbox, signatureFor } from "./sequence-rules.js";
 import {
   advance, cleanPerson, deleteSignature, endEnrollments, enroll, getSettings, listSignatures, parts, saveSettings, signatureBodies,
   skipOpenTouches, stepsOf, unsubscribe, upsertPerson, type Campaign, type Enrollment, type Person, type Settings, type SettingsPatch,
@@ -86,6 +86,7 @@ const CampaignSchema = z.object({
   angle: z.string().openapi({ description: "Who it writes to and why: frames every draft" }),
   status: z.enum(["draft", "active", "paused", "archived"]),
   stop_company: z.boolean().openapi({ description: "A reply or a booked meeting from anyone at a company stops everyone there" }),
+  audience: z.enum(["people", "inboxes"]).openapi({ description: "people: named people. inboxes: companies' shared addresses (info@, contact@), written to with no first name. Never both." }),
   signature_id: z.string().nullable().openapi({ description: "First emails: null = the workspace default, 'none' = no signature, else a signature id" }),
   reply_signature_id: z.string().nullable().openapi({ description: "Follow-ups: the same" }),
   source: z.object({
@@ -115,6 +116,7 @@ const PersonSchema = z.object({
   linkedin_url: z.string(),
   phone: z.string(),
   notes: z.string().openapi({ description: "Context and evidence for whoever writes to them" }),
+  inbox: z.boolean().openapi({ description: "A company's shared inbox (info@, contact@), not a person: written to with no first name" }),
   source: z.string(),
   crm_contact_id: z.string().nullable(),
   unsubscribed_at: z.string().nullable(),
@@ -181,7 +183,7 @@ const CAMPAIGN_SELECT = `SELECT c.*,
 
 function campaignView(r: CampaignRow) {
   return {
-    id: r.id, name: r.name, angle: r.angle, status: r.status, stop_company: !!r.stop_company,
+    id: r.id, name: r.name, angle: r.angle, status: r.status, stop_company: !!r.stop_company, audience: r.audience,
     signature_id: r.signature_id, reply_signature_id: r.reply_signature_id,
     source: r.source_list_id && r.source_app_id
       ? {
@@ -215,7 +217,7 @@ const PERSON_SELECT = `SELECT p.*, le.campaign_id AS c_id, lc.name AS c_name, le
 function personView(r: PersonRow) {
   return {
     id: r.id, email: r.email, first_name: r.first_name, last_name: r.last_name, title: r.title, company: r.company, domain: r.domain,
-    linkedin_url: r.linkedin_url, phone: r.phone, notes: r.notes, source: r.source, crm_contact_id: r.crm_contact_id,
+    linkedin_url: r.linkedin_url, phone: r.phone, notes: r.notes, inbox: isInbox(r.email), source: r.source, crm_contact_id: r.crm_contact_id,
     unsubscribed_at: r.unsubscribed_at, bounced_at: r.bounced_at, created_at: r.created_at,
     campaign: r.c_id ? { id: r.c_id, name: r.c_name ?? "", status: r.c_status ?? "", step: r.c_step ?? 0, reason: r.c_reason } : null,
   };
@@ -258,7 +260,7 @@ function touchView(r: TouchRow) {
     instructions: r.instructions ?? "", writer: (r.writer ?? "thread") as "research" | "thread",
     due_at: r.due_at, sent_at: r.sent_at, starts_thread: startsThread,
     research: r.status === "research" ? { agent_id: r.research_agent_id, sent_at: r.research_sent_at, tries: r.research_tries } : null,
-    person: { id: r.person_id, email: r.email, first_name: r.first_name, last_name: r.last_name, title: r.title, company: r.company, linkedin_url: r.linkedin_url, phone: r.phone, notes: r.person_notes },
+    person: { id: r.person_id, email: r.email, first_name: r.first_name, last_name: r.last_name, title: r.title, company: r.company, linkedin_url: r.linkedin_url, phone: r.phone, notes: r.person_notes, inbox: isInbox(r.email) },
     campaign: { id: r.campaign_id, name: r.campaign_name },
     enrollment: { id: r.enrollment_id, status: r.e_status, reason: r.e_reason },
   };
@@ -444,6 +446,7 @@ const createCampaign = createRoute({
             name: z.string().min(1).max(120),
             angle: z.string().max(2000).optional(),
             stop_company: z.boolean().optional(),
+            audience: z.enum(["people", "inboxes"]).optional().openapi({ description: "Default people" }),
             steps: z.array(z.object({
               wait_days: z.number().int(), channel: z.enum(CHANNELS), writer: z.enum(WRITERS).optional(), instructions: z.string().optional(),
             })).optional(),
@@ -463,8 +466,8 @@ app.openapi(createCampaign, async (c) => {
   try {
     const b = c.req.valid("json");
     const id = crypto.randomUUID();
-    await run("INSERT INTO campaigns (id, name, angle, stop_company, created_by) VALUES (?, ?, ?, ?, ?)", [
-      id, b.name.trim(), (b.angle ?? "").trim(), b.stop_company === false ? 0 : 1, who(c),
+    await run("INSERT INTO campaigns (id, name, angle, stop_company, audience, created_by) VALUES (?, ?, ?, ?, ?, ?)", [
+      id, b.name.trim(), (b.angle ?? "").trim(), b.stop_company === false ? 0 : 1, b.audience ?? "people", who(c),
     ]);
     const bad = await writeSteps(id, b.steps ?? DEFAULT_STEPS);
     if (bad) {
@@ -514,7 +517,7 @@ app.openapi(getCampaign, async (c) => {
     : 0;
   const recent = row.source_list_id
     ? await query<{ email: string | null; outcome: "enrolled" | "skipped"; reason: string | null; taken_at: string }>(
-      `SELECT p.email, st.outcome, st.reason, st.taken_at FROM source_taken st LEFT JOIN people p ON p.id = st.person_id
+      `SELECT COALESCE(p.email, st.email) AS email, st.outcome, st.reason, st.taken_at FROM source_taken st LEFT JOIN people p ON p.id = st.person_id
         WHERE st.campaign_id = ? ORDER BY st.taken_at DESC LIMIT 10`,
       [id],
     )
@@ -546,6 +549,12 @@ app.patch("/api/campaigns/:id", async (c) => {
       sets.push("stop_company = ?");
       params.push(b.stop_company ? 1 : 0);
     }
+    // Who it writes to. People already in it stay: a change applies to whoever joins next.
+    if (b.audience !== undefined) {
+      if (b.audience !== "people" && b.audience !== "inboxes") return c.json({ error: "audience is people or inboxes" }, 400);
+      sets.push("audience = ?");
+      params.push(b.audience);
+    }
     for (const key of ["signature_id", "reply_signature_id"] as const) {
       if (b[key] === undefined) continue;
       const v = b[key];
@@ -556,11 +565,9 @@ app.patch("/api/campaigns/:id", async (c) => {
       params.push(v);
     }
     // The list it takes new people from: { app_id, list_id, daily?, per_company? }, or null to stop.
-    let demand: { app: string; list: string; daily: number } | null | undefined;
     if (b.source !== undefined) {
       if (b.source === null) {
         sets.push("source_app_id = NULL, source_list_id = NULL, source_list_name = NULL, source_checked_at = NULL, source_error = NULL");
-        demand = null;
       } else {
         const src = b.source as Record<string, unknown>;
         const appId = typeof src.app_id === "string" ? src.app_id : row.source_app_id;
@@ -579,7 +586,6 @@ app.patch("/api/campaigns/:id", async (c) => {
         }
         sets.push("source_app_id = ?, source_list_id = ?, source_list_name = ?, source_daily = ?, source_per_company = ?, source_checked_at = NULL, source_error = NULL");
         params.push(appId, listId, name, daily, perCompany);
-        demand = { app: appId, list: listId, daily };
       }
     }
     if (b.status !== undefined) {
@@ -593,18 +599,23 @@ app.patch("/api/campaigns/:id", async (c) => {
       params.push(to);
     }
     if (sets.length) await run(`UPDATE campaigns SET ${sets.join(", ")}, updated_at = datetime('now') WHERE id = ?`, [...params, id]);
-    // The list sizes its email lookups by what its campaigns take; an archived campaign takes nothing.
-    if (b.status === "archived" && row.source_list_id) demand = null;
-    if (demand !== undefined) {
+    const after = (await campaignById(id))!;
+    // The list sizes its email lookups by what its campaigns take a day. An
+    // archived campaign takes nothing, and one written to inboxes needs no
+    // lookups: an inbox comes with its address.
+    const asks = (r: Campaign) => !!(r.source_app_id && r.source_list_id) && r.status !== "archived" && r.audience === "people";
+    if (b.source !== undefined || b.status === "archived" || b.audience !== undefined) {
       const key = `opensequence:${id}`;
-      const moved = row.source_app_id && row.source_list_id && (!demand || demand.app !== row.source_app_id || demand.list !== row.source_list_id);
+      const was = asks(row);
+      const now = asks(after);
+      const moved = was && (!now || after.source_app_id !== row.source_app_id || after.source_list_id !== row.source_list_id);
       try {
         if (moved) await dropListDemand(c.env, row.source_app_id!, row.source_list_id!, key);
-        if (demand) await setListDemand(c.env, demand.app, demand.list, key, `OpenSequence: ${b.name ?? row.name}`, demand.daily);
+        if (now && (b.source || !was)) await setListDemand(c.env, after.source_app_id!, after.source_list_id!, key, `OpenSequence: ${after.name}`, after.source_daily);
       } catch (e) {
-        if (demand) await run("UPDATE campaigns SET source_error = ? WHERE id = ?", [`Couldn't tell the list this campaign's daily number: ${(e as Error).message}`.slice(0, 300), id]);
+        if (now) await run("UPDATE campaigns SET source_error = ? WHERE id = ?", [`Couldn't tell the list this campaign's daily number: ${(e as Error).message}`.slice(0, 300), id]);
       }
-      if (demand) await kick(c);
+      if (after.source_list_id && after.status !== "archived" && (b.source || b.audience !== undefined)) await kick(c);
     }
     if (b.status === "archived") {
       const live = await query<{ id: string }>("SELECT id FROM enrollments WHERE campaign_id = ? AND status IN ('active', 'paused')", [id]);

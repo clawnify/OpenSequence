@@ -4,7 +4,7 @@
 
 import freemailDomains from "free-email-domains";
 import { get, query, run } from "./db.js";
-import { companyDomain, isEmail, nextStep, dueAfter, normaliseEmail } from "./sequence-rules.js";
+import { audienceMismatch, companyDomain, isEmail, nextStep, dueAfter, normaliseEmail, type Audience } from "./sequence-rules.js";
 
 // ── Rows ───────────────────────────────────────────────────────────
 
@@ -45,6 +45,8 @@ export interface Campaign {
   angle: string;
   status: "draft" | "active" | "paused" | "archived";
   stop_company: number;
+  /** Who it writes to: named people, or companies' shared inboxes (info@) with no first name. */
+  audience: Audience;
   /** null: the workspace default; "none": no signature; else a signature's id. */
   signature_id: string | null;
   reply_signature_id: string | null;
@@ -309,6 +311,8 @@ export interface EnrollResult {
  */
 export async function enroll(campaignId: string, personIds: string[], by: string | null, now = new Date()): Promise<EnrollResult> {
   const steps = await stepsOf(campaignId);
+  // A campaign writes to named people or to companies' inboxes, never both.
+  const audience = ((await get<{ audience: string }>("SELECT audience FROM campaigns WHERE id = ?", [campaignId]))?.audience ?? "people") as Audience;
   if (!steps.length) throw new Error("Add the campaign's steps before adding people");
   const first = steps[0];
   const result: EnrollResult = { enrolled: 0, skipped: [] };
@@ -333,7 +337,7 @@ export async function enroll(campaignId: string, personIds: string[], by: string
             ? "Already in this campaign"
             : p.live_in
               ? `Already being emailed in ${p.live_in}`
-              : null;
+              : audienceMismatch(audience, p.email);
       if (reason) {
         result.skipped.push({ person_id: p.id, email: p.email, reason });
         continue;

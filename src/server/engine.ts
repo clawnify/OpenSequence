@@ -24,8 +24,8 @@ import {
 import {
   DAY_MS, MINUTE_MS, PREPARE_AHEAD_MS, addressOf, addressesIn, bookedWith, coerceDraft, coerceReading, companyDomain,
   composeEmail, dailyCap, dayStart, draftPrompt, signatureFor, emailDomain, inboundKind, isInbound, localDay, needsOptOutCheck, nextSendAt, normaliseEmail,
-  leadPerson, leadVerdict, ownWords, prepareBudget, readingPrompt, researchBatch, researchInstruction, SOURCE_CHECK_MS, type GmailMessage,
-  type ResearchWaiting, type Window,
+  isInbox, leadPerson, leadVerdict, ownWords, prepareBudget, readingPrompt, researchBatch, researchInstruction, SOURCE_CHECK_MS, type GmailMessage,
+  type ListLead, type ResearchWaiting, type Window,
 } from "./sequence-rules.js";
 import {
   OPEN_TOUCH, advance, cleanPerson, endEnrollments, enroll, getSettings, isPersonal, parts, personName, signatureBodies, skipOpenTouches, stepsOf,
@@ -441,19 +441,26 @@ async function pullLists(ctx: Ctx): Promise<void> {
           "SELECT p.domain, COUNT(*) AS n FROM enrollments e JOIN people p ON p.id = e.person_id WHERE e.campaign_id = ? AND p.domain != '' GROUP BY p.domain",
           [c.id],
         )).map((r) => [r.domain, r.n]));
-        const record = (leadId: string, personId: string | null, outcome: "enrolled" | "skipped", reason: string | null) =>
-          run("INSERT OR IGNORE INTO source_taken (campaign_id, lead_id, person_id, outcome, reason, taken_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [c.id, leadId, personId, outcome, reason, new Date().toISOString()]);
+        const record = (lead: ListLead, personId: string | null, outcome: "enrolled" | "skipped", reason: string | null) =>
+          run("INSERT OR IGNORE INTO source_taken (campaign_id, lead_id, person_id, email, outcome, reason, taken_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [c.id, lead.id, personId, normaliseEmail(lead.email).slice(0, 254) || null, outcome, reason, new Date().toISOString()]);
         for (let page = 1; page <= LIST_PAGES && room > 0; page++) {
-          const r = await listMembersPage(ctx.env, c.source_app_id!, c.source_list_id!, page);
+          const r = await listMembersPage(ctx.env, c.source_app_id!, c.source_list_id!, page, c.audience === "inboxes" ? "inbox" : "person");
           for (const lead of r.members) {
             if (room <= 0) break;
             const domain = companyDomain(normaliseEmail(lead.email), isPersonal);
-            if (leadVerdict(lead, taken, perCompany, c.source_per_company, domain) !== "take") continue;
+            const verdict = leadVerdict(lead, taken, perCompany, c.source_per_company, domain, c.audience);
+            // The other kind of address stays the other kind: say so once, and stop reading it.
+            if (verdict === "other_audience") {
+              taken.add(lead.id);
+              await record(lead, null, "skipped", c.audience === "inboxes" ? "Not a company inbox" : "A company inbox");
+              continue;
+            }
+            if (verdict !== "take") continue;
             taken.add(lead.id);
             const clean = cleanPerson(leadPerson(lead));
             if ("error" in clean) {
-              await record(lead.id, null, "skipped", clean.error);
+              await record(lead, null, "skipped", clean.error);
               continue;
             }
             const existing = await get<Person>("SELECT * FROM people WHERE email = ?", [clean.email]);
@@ -462,9 +469,9 @@ async function pullLists(ctx: Ctx): Promise<void> {
             if (result.enrolled) {
               room--;
               if (domain) perCompany.set(domain, (perCompany.get(domain) ?? 0) + 1);
-              await record(lead.id, person.id, "enrolled", null);
+              await record(lead, person.id, "enrolled", null);
             } else {
-              await record(lead.id, person.id, "skipped", result.skipped[0]?.reason ?? "Not added");
+              await record(lead, person.id, "skipped", result.skipped[0]?.reason ?? "Not added");
             }
           }
           if (r.members.length === 0 || r.page * r.limit >= r.total) break;
@@ -591,13 +598,14 @@ async function draftNext(ctx: Ctx): Promise<void> {
     const step = t.step_id ? await get<{ instructions: string }>("SELECT instructions FROM steps WHERE id = ?", [t.step_id]) : undefined;
     const person = await get<Person>("SELECT * FROM people WHERE id = ?", [t.person_id]);
     if (!campaign || !person) continue;
+    const inbox = isInbox(person.email);
     const sent = await sentOn(t.enrollment_id);
     const needsSubject = !t.thread_id && !sent.length;
     const prompt = draftPrompt({
       about,
       campaign,
       step: { position: t.position, total: t.total, instructions: step?.instructions ?? "" },
-      person,
+      person: { ...person, inbox },
       sent,
       review_note: t.review_note,
       needsSubject,

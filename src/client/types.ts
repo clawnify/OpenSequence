@@ -46,6 +46,8 @@ export interface Campaign {
   angle: string;
   status: CampaignStatus;
   stop_company: boolean;
+  /** Who it writes to: named people, or companies' general addresses (info@) with no first name. Never both. */
+  audience: "people" | "inboxes";
   /** null: the workspace default; "none": no signature; else a signature's id. */
   signature_id: string | null;
   reply_signature_id: string | null;
@@ -84,6 +86,8 @@ export interface Person extends PersonRef {
   linkedin_url: string;
   phone: string;
   notes: string;
+  /** A company's general address (info@, contact@), not a person's. */
+  inbox: boolean;
   source: string;
   crm_contact_id: string | null;
   unsubscribed_at: string | null;
@@ -119,7 +123,7 @@ export interface Touch {
   starts_thread: boolean;
   /** For a touch waiting for research: whom it was handed to, when, and how many times. */
   research: { agent_id: string | null; sent_at: string | null; tries: number } | null;
-  person: PersonRef & { linkedin_url: string; phone: string; notes: string };
+  person: PersonRef & { linkedin_url: string; phone: string; notes: string; inbox: boolean };
   campaign: { id: string; name: string };
   enrollment: { id: string; status: EnrollmentStatus; reason: string | null };
 }

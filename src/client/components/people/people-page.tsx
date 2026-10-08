@@ -78,7 +78,12 @@ export function PeoplePage({ navigate }: { navigate: Navigate }) {
                     <TableCell pinned>
                       <a href={`/people/${encodeURIComponent(p.id)}`} onClick={(e) => { e.preventDefault(); navigate(`/people/${encodeURIComponent(p.id)}`); }} className="flex min-w-0 items-center gap-2 font-medium">
                         <Avatar firstName={p.first_name || p.email} lastName={p.last_name} className="size-6 text-[0.625rem]" />
-                        <span className="truncate">{personName(p)}</span>
+                        {p.inbox && !p.first_name && !p.last_name ? (
+                          <span className="truncate font-normal text-muted-foreground">Company inbox</span>
+                        ) : (
+                          <span className="truncate">{personName(p)}</span>
+                        )}
+                        {p.inbox && (p.first_name || p.last_name) && <span className="shrink-0 text-[0.75rem] font-normal text-muted-foreground">Company inbox</span>}
                       </a>
                     </TableCell>
                     <TableCell className="truncate text-muted-foreground">{p.email}</TableCell>
