@@ -7,7 +7,7 @@ import {
   CHANNELS, WRITERS, dayStart, dailyCap, isDay, isHtml, isTimezone, localDay, minutesOf, nextSendAt, normaliseEmail, validateSteps,
 } from "./sequence-rules.js";
 import { MAX_SIGNATURE, sanitizeSignature } from "./signature.js";
-import { NO_SIGNATURE, isInbox, signatureFor } from "./sequence-rules.js";
+import { NO_SIGNATURE, crmNotes, isInbox, signatureFor } from "./sequence-rules.js";
 import {
   advance, cleanPerson, deleteSignature, endEnrollments, enroll, getSettings, listSignatures, parts, saveSettings, signatureBodies,
   skipOpenTouches, stepsOf, unsubscribe, upsertPerson, type Campaign, type Enrollment, type Person, type Settings, type SettingsPatch,
@@ -15,7 +15,7 @@ import {
 } from "./store.js";
 import { crmAppOf, ensureScheduled, runAndBook, scheduleRun, windowOf, type EngineEnv } from "./engine.js";
 import {
-  connectionStatus, contactApps, crmContactsPage, dropListDemand, gmailSignature, leadApps, listsOf, mailFor, mailboxes, setListDemand, whatWeSell,
+  AppAnswerError, connectionStatus, contactApps, crmContactsPage, crmLookup, dropListDemand, gmailSignature, leadApps, listsOf, mailFor, mailboxes, setListDemand, whatWeSell,
   workspaceAgents,
 } from "./integrations.js";
 
@@ -1073,6 +1073,71 @@ app.openapi(getTouch, async (c) => {
   const signature = signatureFor(view.starts_thread ? "first" : "reply", campaign ?? { signature_id: null, reply_signature_id: null }, await getSettings(), await signatureBodies());
   const sold = await whatWeSell(c.env, (await getSettings()).about).catch(() => ({ text: "" }));
   return c.json({ touch: view, thread, replies, signature, what_we_sell: sold.text }, 200);
+});
+
+const CrmKnownSchema = z.object({
+  contact: z.object({ id: z.string(), first_name: z.string(), last_name: z.string(), title: z.string(), status: z.string() }).nullable(),
+  company: z.object({ id: z.string(), name: z.string(), domain: z.string(), customer_since: z.string().nullable(), renewal_date: z.string().nullable() }).nullable(),
+  deals: z.array(z.object({
+    id: z.string(), name: z.string(), stage: z.string(), stage_label: z.string(), state: z.enum(["open", "won", "lost"]), value: z.number(), close_date: z.string(),
+  })),
+  last_call_at: z.string().nullable(),
+  next_meeting: z.object({ title: z.string(), starts_at: z.string() }).nullable(),
+});
+
+const touchCrm = createRoute({
+  method: "get",
+  path: "/api/touches/{id}/crm",
+  tags: ["Touches"],
+  summary: "What the connected CRM knows about the person a touch is for, read now",
+  description: "Read before approving: whether their company is a customer, a call is booked, a deal is open, when the last call was, and a lost deal. `notes` says it in words, the ones to think about (`warn`) first. `crm` is false when no CRM is connected; `error` says why the CRM could not be checked (an older CRM without GET /api/lookup, or no answer).",
+  request: { params: z.object({ id: z.string() }) },
+  responses: {
+    200: {
+      description: "What the CRM knows",
+      content: {
+        "application/json": {
+          schema: z.object({
+            crm: z.boolean(),
+            known: CrmKnownSchema.nullable(),
+            notes: z.array(z.object({ tone: z.enum(["warn", "info"]), text: z.string() })),
+            link: z.string().nullable().openapi({ description: "The company (else the contact) in the CRM, when the CRM's address is known" }),
+            error: z.string().nullable(),
+          }),
+        },
+      },
+    },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(touchCrm, async (c) => {
+  const { id } = c.req.valid("param");
+  const person = await get<{ email: string; domain: string }>(
+    "SELECT p.email, p.domain FROM touches t JOIN enrollments e ON e.id = t.enrollment_id JOIN people p ON p.id = e.person_id WHERE t.id = ?",
+    [id],
+  );
+  if (!person) return c.json({ error: "No such touch" }, 404);
+  const s = await getSettings();
+  const appId = crmAppOf(c.env, s);
+  if (!appId) return c.json({ crm: false, known: null, notes: [], link: null, error: null }, 200);
+  const [known, apps] = await Promise.allSettled([
+    crmLookup(c.env, appId, { email: person.email, domain: person.domain }),
+    contactApps(c.env, originOf(c)),
+  ]);
+  if (known.status === "rejected") {
+    const err = known.reason;
+    // An OpenCRM from before GET /api/lookup answers not_found; a CRM app that's gone answers "App not found."
+    const error = err instanceof AppAnswerError && err.status === 404 && err.code === "not_found"
+      ? "Your CRM can't be checked from here: update it to its latest version."
+      : `Couldn't check your CRM: ${err instanceof Error ? err.message : String(err)}`;
+    return c.json({ crm: true, known: null, notes: [], link: null, error }, 200);
+  }
+  const k = known.value;
+  const base = apps.status === "fulfilled" ? apps.value.find((a) => a.id === appId)?.url.replace(/\/+$/, "") : undefined;
+  const link = base && k.company ? `${base}/companies/${encodeURIComponent(k.company.id)}`
+    : base && k.contact ? `${base}/contacts/${encodeURIComponent(k.contact.id)}` : null;
+  return c.json({ crm: true, known: k, notes: crmNotes(k, new Date(), s.timezone), link, error: null }, 200);
 });
 
 function cleanSources(v: unknown): Array<{ title: string; url: string; note: string }> | { error: string } {

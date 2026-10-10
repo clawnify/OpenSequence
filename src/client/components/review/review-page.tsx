@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, ExternalLink, Linkedin, PenLine, Phone, RefreshCw, Search, Sparkles, Undo2 } from "lucide-react";
+import { AlertTriangle, Check, ExternalLink, Linkedin, PenLine, Phone, RefreshCw, Search, Sparkles, Undo2 } from "lucide-react";
 import { openChat, useChatContext, useHasChat } from "@clawnify/app/client";
 import { api } from "@/api";
 import { useApp } from "@/context";
@@ -15,7 +15,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { Page, Touch, TouchDetail } from "@/types";
+import type { CrmCheck, Page, Touch, TouchDetail } from "@/types";
 
 const TAB_LABEL: Record<ReviewTab, string> = {
   review: "To approve",
@@ -170,6 +170,7 @@ function Detail({ detail, onBack, onSettled, navigate }: { detail: TouchDetail; 
     <div className="mx-auto flex max-w-3xl flex-col gap-6 p-4 md:p-6">
       <button type="button" onClick={onBack} className="-mb-2 self-start text-[0.8125rem] text-muted-foreground hover:text-foreground md:hidden">← Back</button>
       <PersonHeader touch={t} navigate={navigate} />
+      <CrmCheckLine touchId={t.id} navigate={navigate} />
       {t.review_note && (t.status === "research" || t.status === "drafting") && (
         <p className="rounded-md bg-secondary px-3 py-2 text-[0.8125rem]">Sent back with: {t.review_note}</p>
       )}
@@ -178,6 +179,44 @@ function Detail({ detail, onBack, onSettled, navigate }: { detail: TouchDetail; 
       {t.status === "todo" && <TaskPanel touch={t} onSettled={onSettled} />}
       <Context detail={detail} />
     </div>
+  );
+}
+
+/** What the CRM knows about them, read as the draft opens: a customer, a call booked or an open deal stands out. */
+function CrmCheckLine({ touchId, navigate }: { touchId: string; navigate: Navigate }) {
+  const { data } = useLoad<CrmCheck>(`/api/touches/${encodeURIComponent(touchId)}/crm`);
+  const small = "text-[0.8125rem] text-muted-foreground";
+  if (!data) return <p className={small}>Checking your CRM…</p>;
+  if (!data.crm) {
+    return (
+      <p className={small}>
+        No CRM is connected, so nothing checked whether they're already a customer.{" "}
+        <button type="button" onClick={() => navigate("/settings")} className="underline hover:text-foreground">Connect one</button>
+      </p>
+    );
+  }
+  if (data.error) return <Notice>{data.error}</Notice>;
+  const open = data.link && (
+    <a href={data.link} target="_blank" rel="noreferrer noopener" className="inline-flex shrink-0 items-center gap-1 text-muted-foreground hover:text-foreground">
+      Open in CRM <ExternalLink className="size-3" />
+    </a>
+  );
+  if (!data.notes.some((n) => n.tone === "warn")) {
+    return <p className={cn(small, "flex flex-wrap gap-x-3")}><span>{data.notes.map((n) => n.text).join(" ")}</span>{open}</p>;
+  }
+  return (
+    <section aria-label="In your CRM" className="flex flex-col gap-1.5 rounded-md bg-warning-tint px-3 py-2.5 text-[0.8125rem]">
+      <div className="flex items-center gap-2 text-warning">
+        <AlertTriangle className="size-3.5 shrink-0" />
+        <h2 className="font-medium">Check before approving</h2>
+        <span className="ml-auto">{open}</span>
+      </div>
+      <ul className="flex flex-col gap-1 pl-5.5">
+        {data.notes.map((n, i) => (
+          <li key={i} className={n.tone === "warn" ? "text-foreground" : "text-muted-foreground"}>{n.text}</li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
