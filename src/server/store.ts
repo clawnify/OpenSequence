@@ -310,8 +310,9 @@ export interface EnrollResult {
  * Puts people in a campaign at its first step. Never someone who asked not to
  * be written to or whose address bounced, and never someone already being
  * written to by another campaign: one person, one conversation at a time.
+ * `keptOut` holds other reasons to leave someone out, by person id: the CRM's,
+ * worked out by the caller, which can reach it.
  */
-/** `keptOut`: reasons by person id to leave someone out (the CRM's, worked out by the caller). */
 export async function enroll(
   campaignId: string,
   personIds: string[],

@@ -525,7 +525,7 @@ async function pullLists(ctx: Ctx): Promise<void> {
       }
     } catch (e) {
       error = (e instanceof CrmCheckError
-        ? `${e.message}. Nobody new was taken: it tries again in an hour`
+        ? `${e.message.replace(/\.$/, "")}. Nobody new was taken: it tries again in an hour`
         : `Couldn't read ${c.source_list_name ?? "the list"}: ${(e as Error).message}`).slice(0, 300);
     }
     await run("UPDATE campaigns SET source_checked_at = ?, source_error = ? WHERE id = ?", [ctx.now.toISOString(), error, c.id]);
