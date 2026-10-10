@@ -59,8 +59,9 @@ filling; the app takes the people itself, each hour, up to the number a day.
   Put the evidence in `notes`, with links: the writer works from it.
 - People already here: `POST /api/campaigns/{id}/enroll` `{ "emails": [...] }`.
 - Skipped people come back with the reason: asked not to be emailed, bounced,
-  already in another live campaign, or the wrong kind of address for the
-  campaign (below). Don't work around it.
+  already in another live campaign, the wrong kind of address for the
+  campaign (below), or known to the CRM ("In your CRM: …": their company is a
+  customer, has an open deal or a call booked). Don't work around it.
 
 ### Company inboxes (info@, contact@)
 
@@ -76,6 +77,9 @@ address. People carry `inbox: true` when their address is one.
 - `POST /api/campaigns` `{ "name", "angle", "audience"?, "steps"? }` creates a draft. Without
   steps it gets a researched first email and three follow-ups (days 0, 3, 7 and
   14). A step is `{ "wait_days", "channel": "email" | "call" | "linkedin" | "task", "writer": "research" | "thread", "instructions" }`.
+- A campaign keeps out people the CRM knows (`skip_known`, on by default). Set
+  `"skip_known": false` only when the person asks for a campaign to customers or
+  open deals.
 - Starting it (`PATCH /api/campaigns/{id}` `{ "status": "active" }`) is for when
   the person asks. Nothing is sent until each email is approved anyway.
 - Signatures: a campaign uses the workspace defaults, one for first emails and

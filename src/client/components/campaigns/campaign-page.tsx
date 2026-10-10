@@ -123,6 +123,7 @@ const AUDIENCES = [
 ];
 
 function About({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record<string, unknown>) => Promise<void> }) {
+  const { overview } = useApp();
   const [angle, setAngle] = useState(c.angle);
   const [name, setName] = useState(c.name);
   useEffect(() => setAngle(c.angle), [c.angle]);
@@ -153,6 +154,19 @@ function About({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record
       <div className="flex items-center gap-3">
         <Switch checked={c.stop_company} onChange={(v) => void onSave({ stop_company: v })} label="Stop the whole company" />
         <span className="text-sm">When someone replies or books a meeting, stop writing to everyone else at their company</span>
+      </div>
+      <div className="flex items-start gap-3">
+        <Switch checked={c.skip_known} onChange={(v) => void onSave({ skip_known: v })} label="Skip people your CRM knows" />
+        <span className="text-sm">
+          Leave out anyone whose company is a customer, has an open deal or a call booked, checked in your CRM as they join
+          <span className="block text-[0.8125rem] text-muted-foreground">
+            {overview && !overview.crm
+              ? "No CRM is connected, so nobody is checked."
+              : c.skip_known
+                ? "Turn it off for a campaign meant for customers."
+                : "Off: customers and companies mid-deal can join this campaign."}
+          </span>
+        </span>
       </div>
       <CampaignSignatures campaign={c} onSave={onSave} />
     </section>

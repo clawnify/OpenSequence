@@ -351,6 +351,18 @@ export async function crmLookup(env: PlatformEnv, appId: string, p: { email: str
   return r as CrmKnown;
 }
 
+/** What the CRM knows about each address, in order: its POST /api/lookup, 100 at a time. */
+export async function crmLookupMany(env: PlatformEnv, appId: string, addresses: Array<{ email: string; domain: string }>): Promise<CrmKnown[]> {
+  const out: CrmKnown[] = [];
+  for (let i = 0; i < addresses.length; i += 100) {
+    const part = addresses.slice(i, i + 100).map((a) => (a.domain ? a : { email: a.email }));
+    const r = await appFetch<{ results?: unknown }>(env, appId, "POST", "/api/lookup", { addresses: part });
+    if (!Array.isArray(r.results) || r.results.length !== part.length) throw new Error("The CRM's answer isn't one for each address asked");
+    out.push(...(r.results as CrmKnown[]));
+  }
+  return out;
+}
+
 /** A line on the contact's timeline. `email` counts toward its emails. */
 export async function crmNote(env: PlatformEnv, appId: string, contactId: string, type: "email" | "note", text: string): Promise<void> {
   await appFetch(env, appId, "POST", "/api/activities", { entity_type: "contact", entity_id: contactId, type, body: text });

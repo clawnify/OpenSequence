@@ -47,6 +47,8 @@ export interface Campaign {
   stop_company: number;
   /** Who it writes to: named people, or companies' shared inboxes (info@) with no first name. */
   audience: Audience;
+  /** 1: people the CRM knows (a customer, an open deal, a call booked) stay out as they join. */
+  skip_known: number;
   /** null: the workspace default; "none": no signature; else a signature's id. */
   signature_id: string | null;
   reply_signature_id: string | null;
@@ -309,7 +311,14 @@ export interface EnrollResult {
  * be written to or whose address bounced, and never someone already being
  * written to by another campaign: one person, one conversation at a time.
  */
-export async function enroll(campaignId: string, personIds: string[], by: string | null, now = new Date()): Promise<EnrollResult> {
+/** `keptOut`: reasons by person id to leave someone out (the CRM's, worked out by the caller). */
+export async function enroll(
+  campaignId: string,
+  personIds: string[],
+  by: string | null,
+  now = new Date(),
+  keptOut: Map<string, string> = new Map(),
+): Promise<EnrollResult> {
   const steps = await stepsOf(campaignId);
   // A campaign writes to named people or to companies' inboxes, never both.
   const audience = ((await get<{ audience: string }>("SELECT audience FROM campaigns WHERE id = ?", [campaignId]))?.audience ?? "people") as Audience;
@@ -337,7 +346,7 @@ export async function enroll(campaignId: string, personIds: string[], by: string
             ? "Already in this campaign"
             : p.live_in
               ? `Already being emailed in ${p.live_in}`
-              : audienceMismatch(audience, p.email);
+              : audienceMismatch(audience, p.email) ?? keptOut.get(p.id) ?? null;
       if (reason) {
         result.skipped.push({ person_id: p.id, email: p.email, reason });
         continue;

@@ -820,3 +820,13 @@ export function crmNotes(k: CrmKnown, now: Date, tz: string): CrmNote[] {
   if (co) return [{ tone: "info", text: `${co.name} is in your CRM, with no open deals or calls.` }];
   return [{ tone: "info", text: "Not in your CRM." }];
 }
+
+/**
+ * Why the CRM keeps someone out of a campaign that skips people it knows: the
+ * first thing a reviewer would be warned about (a customer, a call booked, an
+ * open deal), or null.
+ */
+export function crmKeepOut(k: CrmKnown, now: Date, tz: string): string | null {
+  const warn = crmNotes(k, now, tz).find((n) => n.tone === "warn");
+  return warn ? `In your CRM: ${warn.text}` : null;
+}

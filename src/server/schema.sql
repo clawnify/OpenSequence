@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   status TEXT NOT NULL DEFAULT 'draft',     -- 'draft' | 'active' | 'paused' | 'archived'
   stop_company INTEGER NOT NULL DEFAULT 1,  -- a reply or meeting from anyone at a company stops everyone there
   audience TEXT NOT NULL DEFAULT 'people',  -- 'people': named people | 'inboxes': companies' public addresses (info@), with no first name; never both
+  skip_known INTEGER NOT NULL DEFAULT 1,    -- people the CRM knows (their company a customer, a deal open, a call booked) stay out as they join; 0 for a campaign meant for them
   signature_id TEXT,                        -- first emails: null = the workspace default, 'none' = no signature, else a signature
   reply_signature_id TEXT,                  -- follow-ups: the same
   source_app_id TEXT,                       -- an app in the workspace that keeps lists of people (OpenProspector); null: none
