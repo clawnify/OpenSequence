@@ -749,3 +749,74 @@ export function leadVerdict(
   if (domain && (perCompany.get(domain) ?? 0) >= (audience === "inboxes" ? 1 : cap)) return "company_full";
   return "take";
 }
+
+// ── What the CRM knows, before an email goes out ───────────────────
+
+/** What the CRM knows about an address (OpenCRM's GET /api/lookup). */
+export interface CrmKnown {
+  contact: { id: string; first_name: string; last_name: string; title: string; status: string } | null;
+  company: { id: string; name: string; domain: string; customer_since: string | null; renewal_date: string | null } | null;
+  deals: Array<{ id: string; name: string; stage: string; stage_label: string; state: "open" | "won" | "lost"; value: number; close_date: string }>;
+  last_call_at: string | null;
+  next_meeting: { title: string; starts_at: string } | null;
+}
+
+/** A line for whoever approves: `warn` when a person should think before it goes out. */
+export interface CrmNote {
+  tone: "warn" | "info";
+  text: string;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** A YYYY-MM-DD day as "2 Mar", with the year when it isn't `today`'s. */
+function shortDay(day: string, today: string): string {
+  const [y, m, d] = day.split("-");
+  return `${Number(d)} ${MONTHS[Number(m) - 1]}${y !== today.slice(0, 4) ? ` ${y}` : ""}`;
+}
+
+/** A day or an instant from the CRM, as a short day where the sender is; "" when it isn't one. */
+function crmDay(v: string | null, today: string, tz: string): string {
+  if (!v) return "";
+  if (isDay(v)) return shortDay(v, today);
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? "" : shortDay(localDay(new Date(t), tz), today);
+}
+
+/**
+ * What the CRM says about someone, for whoever approves an email to them, the
+ * riskiest first: a customer, a call booked, an open deal; then the last call
+ * and a lost deal. Says so when the CRM knows them and nothing more, or not at
+ * all. Dates are days where the sender is (`tz`).
+ */
+export function crmNotes(k: CrmKnown, now: Date, tz: string): CrmNote[] {
+  const today = localDay(now, tz);
+  const notes: CrmNote[] = [];
+  const co = k.company;
+  if (co?.customer_since) {
+    const since = crmDay(co.customer_since, today, tz);
+    notes.push({ tone: "warn", text: `${co.name} is a customer${since ? `, since ${since}` : ""}.` });
+  } else if (k.contact?.status.toLowerCase() === "customer") {
+    notes.push({ tone: "warn", text: `${k.contact.first_name || "They"} ${k.contact.first_name ? "is" : "are"} marked a customer.` });
+  }
+  if (k.next_meeting) {
+    const at = crmDay(k.next_meeting.starts_at, today, tz);
+    notes.push({ tone: "warn", text: `A call is booked${at ? ` for ${at}` : ""}: ${k.next_meeting.title}.` });
+  }
+  const open = k.deals.filter((d) => d.state === "open");
+  for (const d of open.slice(0, 2)) notes.push({ tone: "warn", text: `Open deal: ${d.name} (${d.stage_label}).` });
+  if (open.length > 2) notes.push({ tone: "warn", text: `And ${open.length - 2} more open ${open.length - 2 === 1 ? "deal" : "deals"}.` });
+  if (k.last_call_at) {
+    const at = crmDay(k.last_call_at, today, tz);
+    if (at) notes.push({ tone: "info", text: `Last call: ${at}.` });
+  }
+  const lost = k.deals.find((d) => d.state === "lost");
+  if (lost) {
+    const on = crmDay(lost.close_date || null, today, tz);
+    notes.push({ tone: "info", text: `Lost deal: ${lost.name}${on ? `, ${on}` : ""}.` });
+  }
+  if (notes.length) return notes;
+  if (k.contact) return [{ tone: "info", text: `In your CRM (${k.contact.status || "no status"}), with no open deals or calls.` }];
+  if (co) return [{ tone: "info", text: `${co.name} is in your CRM, with no open deals or calls.` }];
+  return [{ tone: "info", text: "Not in your CRM." }];
+}

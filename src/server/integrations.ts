@@ -8,7 +8,7 @@
 import { createAgents } from "@clawnify/agents";
 import { offering, type OrgDocument } from "@clawnify/knowledge";
 import { accounts, connect, describe, type ConnectionsEnv } from "@clawnify/connections";
-import type { CalendarEvent, GmailMessage, ListLead } from "./sequence-rules.js";
+import type { CalendarEvent, CrmKnown, GmailMessage, ListLead } from "./sequence-rules.js";
 import { normaliseEmail } from "./sequence-rules.js";
 
 export const SERVICES = { mail: "gmail", calendar: "googlecalendar", google: "googlesuper" } as const;
@@ -288,8 +288,16 @@ async function appFetch<T>(env: PlatformEnv, appId: string, method: string, path
   } catch {
     data = { error: text.slice(0, 200) };
   }
-  if (!res.ok) throw new Error(`The app answered ${res.status}: ${(data as { error?: string }).error ?? "no reason given"}`);
+  const error = (data as { error?: unknown }).error;
+  if (!res.ok) throw new AppAnswerError(`The app answered ${res.status}: ${(data as { error?: string }).error ?? "no reason given"}`, res.status, typeof error === "string" ? error : "");
   return data as T;
+}
+
+/** An app next door answered with an error: its HTTP status, and its `error` field ("not_found" when the app has no such route). */
+export class AppAnswerError extends Error {
+  constructor(message: string, readonly status: number, readonly code: string) {
+    super(message);
+  }
 }
 
 export interface CrmContact {
@@ -332,6 +340,15 @@ export async function crmContactFor(
   const id = created.id ?? created.contact?.id;
   if (!id) throw new Error("The CRM created the contact but did not return its id");
   return id;
+}
+
+/** What the CRM knows about an address (its GET /api/lookup), before someone writes to it. */
+export async function crmLookup(env: PlatformEnv, appId: string, p: { email: string; domain: string }): Promise<CrmKnown> {
+  const q = new URLSearchParams({ email: p.email });
+  if (p.domain) q.set("domain", p.domain);
+  const r = await appFetch<Partial<CrmKnown>>(env, appId, "GET", `/api/lookup?${q}`);
+  if (!Array.isArray(r.deals) || r.contact === undefined || r.company === undefined) throw new Error("The CRM's answer isn't what it knows about the address");
+  return r as CrmKnown;
 }
 
 /** A line on the contact's timeline. `email` counts toward its emails. */

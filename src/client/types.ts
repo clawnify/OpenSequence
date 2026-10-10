@@ -136,6 +136,14 @@ export interface TouchDetail {
   signature: string;
 }
 
+/** What the connected CRM knows about the person, read when a draft is opened (GET /api/touches/:id/crm). */
+export interface CrmCheck {
+  crm: boolean;
+  notes: Array<{ tone: "warn" | "info"; text: string }>;
+  link: string | null;
+  error: string | null;
+}
+
 export interface Signature {
   id: string;
   name: string;

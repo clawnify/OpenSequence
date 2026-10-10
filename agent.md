@@ -29,7 +29,10 @@ a pick, work the queue when you are asked to:
 1. `GET /api/touches?status=research` lists drafts waiting for research (paged).
 2. For each one, `GET /api/touches/{id}`: the person, the step's instructions,
    what we sell (`what_we_sell`) and the thread so far. Read the campaign's
-   angle with `GET /api/campaigns/{campaign.id}`.
+   angle with `GET /api/campaigns/{campaign.id}`, and what the CRM knows about
+   them with `GET /api/touches/{id}/crm`: its `notes` with tone `warn` (their
+   company is a customer, a call is booked, a deal is open) mean this is no cold
+   email. Say so in `rationale`, and write for it or leave it to the person.
 3. Research the person and their company: their website, recent news, job
    posts, their LinkedIn profile. Find one or two specific facts you can link
    to, that connect to the angle. Skip anything you can't source.
