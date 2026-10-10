@@ -46,6 +46,8 @@ export interface Campaign {
   angle: string;
   status: CampaignStatus;
   stop_company: boolean;
+  /** People the CRM knows (a customer, an open deal, a call booked) stay out as they join. */
+  skip_known: boolean;
   /** Who it writes to: named people, or companies' general addresses (info@) with no first name. Never both. */
   audience: "people" | "inboxes";
   /** null: the workspace default; "none": no signature; else a signature's id. */

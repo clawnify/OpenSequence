@@ -13,7 +13,7 @@ import {
   skipOpenTouches, stepsOf, unsubscribe, upsertPerson, type Campaign, type Enrollment, type Person, type Settings, type SettingsPatch,
   type Step, type Touch,
 } from "./store.js";
-import { crmAppOf, ensureScheduled, runAndBook, scheduleRun, windowOf, type EngineEnv } from "./engine.js";
+import { CrmCheckError, crmAppOf, crmKeptOut, ensureScheduled, runAndBook, scheduleRun, windowOf, type EngineEnv } from "./engine.js";
 import {
   AppAnswerError, connectionStatus, contactApps, crmContactsPage, crmLookup, dropListDemand, gmailSignature, leadApps, listsOf, mailFor, mailboxes, setListDemand, whatWeSell,
   workspaceAgents,
@@ -87,6 +87,7 @@ const CampaignSchema = z.object({
   status: z.enum(["draft", "active", "paused", "archived"]),
   stop_company: z.boolean().openapi({ description: "A reply or a booked meeting from anyone at a company stops everyone there" }),
   audience: z.enum(["people", "inboxes"]).openapi({ description: "people: named people. inboxes: companies' shared addresses (info@, contact@), written to with no first name. Never both." }),
+  skip_known: z.boolean().openapi({ description: "People the connected CRM knows (their company a customer, a deal open, a call booked) stay out as they join, with the reason. Off for a campaign meant for them" }),
   signature_id: z.string().nullable().openapi({ description: "First emails: null = the workspace default, 'none' = no signature, else a signature id" }),
   reply_signature_id: z.string().nullable().openapi({ description: "Follow-ups: the same" }),
   source: z.object({
@@ -183,7 +184,7 @@ const CAMPAIGN_SELECT = `SELECT c.*,
 
 function campaignView(r: CampaignRow) {
   return {
-    id: r.id, name: r.name, angle: r.angle, status: r.status, stop_company: !!r.stop_company, audience: r.audience,
+    id: r.id, name: r.name, angle: r.angle, status: r.status, stop_company: !!r.stop_company, audience: r.audience, skip_known: !!r.skip_known,
     signature_id: r.signature_id, reply_signature_id: r.reply_signature_id,
     source: r.source_list_id && r.source_app_id
       ? {
@@ -447,6 +448,7 @@ const createCampaign = createRoute({
             angle: z.string().max(2000).optional(),
             stop_company: z.boolean().optional(),
             audience: z.enum(["people", "inboxes"]).optional().openapi({ description: "Default people" }),
+            skip_known: z.boolean().optional().openapi({ description: "Default true: people the CRM knows stay out. False only for a campaign meant for customers or open deals" }),
             steps: z.array(z.object({
               wait_days: z.number().int(), channel: z.enum(CHANNELS), writer: z.enum(WRITERS).optional(), instructions: z.string().optional(),
             })).optional(),
@@ -466,8 +468,8 @@ app.openapi(createCampaign, async (c) => {
   try {
     const b = c.req.valid("json");
     const id = crypto.randomUUID();
-    await run("INSERT INTO campaigns (id, name, angle, stop_company, audience, created_by) VALUES (?, ?, ?, ?, ?, ?)", [
-      id, b.name.trim(), (b.angle ?? "").trim(), b.stop_company === false ? 0 : 1, b.audience ?? "people", who(c),
+    await run("INSERT INTO campaigns (id, name, angle, stop_company, audience, skip_known, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)", [
+      id, b.name.trim(), (b.angle ?? "").trim(), b.stop_company === false ? 0 : 1, b.audience ?? "people", b.skip_known === false ? 0 : 1, who(c),
     ]);
     const bad = await writeSteps(id, b.steps ?? DEFAULT_STEPS);
     if (bad) {
@@ -548,6 +550,12 @@ app.patch("/api/campaigns/:id", async (c) => {
       if (typeof b.stop_company !== "boolean") return c.json({ error: "stop_company must be true or false" }, 400);
       sets.push("stop_company = ?");
       params.push(b.stop_company ? 1 : 0);
+    }
+    // Whether people the CRM knows stay out. Like the audience, it applies to whoever joins next.
+    if (b.skip_known !== undefined) {
+      if (typeof b.skip_known !== "boolean") return c.json({ error: "skip_known must be true or false" }, 400);
+      sets.push("skip_known = ?");
+      params.push(b.skip_known ? 1 : 0);
     }
     // Who it writes to. People already in it stay: a change applies to whoever joins next.
     if (b.audience !== undefined) {
@@ -760,13 +768,33 @@ app.openapi(enrollRoute, async (c) => {
     }
   }
   try {
-    const result = await enroll(id, ids, who(c));
+    const result = await enroll(id, ids, who(c), new Date(), await crmReasons(c, row, ids));
     if (result.enrolled && row.status === "active") await kick(c);
     return c.json({ enrolled: result.enrolled, skipped: [...result.skipped, ...missing] }, 200);
   } catch (err) {
     return c.json({ error: (err as Error).message }, 409);
   }
 });
+
+/**
+ * The CRM's reasons to keep these people out of a campaign, by person id. When
+ * the CRM doesn't answer, that is the reason for each of them: nobody joins on
+ * a guess, and adding them again later works.
+ */
+async function crmReasons(c: C, campaign: { skip_known: number }, personIds: string[]): Promise<Map<string, string>> {
+  const s = await getSettings();
+  if (!campaign.skip_known || !crmAppOf(c.env, s) || !personIds.length) return new Map();
+  const people: Array<{ id: string; email: string; domain: string }> = [];
+  for (const chunk of parts([...new Set(personIds)])) {
+    people.push(...(await query<{ id: string; email: string; domain: string }>(`SELECT id, email, domain FROM people WHERE id IN (${inList(chunk.length)})`, chunk)));
+  }
+  try {
+    return await crmKeptOut(c.env, s, campaign, people.map((p) => ({ key: p.id, email: p.email, domain: p.domain })), new Date());
+  } catch (err) {
+    if (!(err instanceof CrmCheckError)) throw err;
+    return new Map(people.map((p) => [p.id, err.message]));
+  }
+}
 
 // Pause, resume or stop one person in a campaign.
 app.post("/api/enrollments/:id/:action{pause|resume|stop}", async (c) => {
@@ -891,7 +919,7 @@ app.openapi(addPeople, async (c) => {
   let enrolled: number | null = null;
   let skipped: Array<{ person_id: string; email: string; reason: string }> = [];
   if (campaign && ids.length) {
-    const r = await enroll(campaign.id, ids, who(c));
+    const r = await enroll(campaign.id, ids, who(c), new Date(), await crmReasons(c, campaign, ids));
     enrolled = r.enrolled;
     skipped = r.skipped;
     if (r.enrolled && campaign.status === "active") await kick(c);

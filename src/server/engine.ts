@@ -18,14 +18,14 @@ import { get, query, run } from "./db.js";
 import { bookableAt } from "./jobs.js";
 import { complete, ModelError, type AiEnv } from "./model.js";
 import {
-  calendarPage, calendarRun, crmContactFor, crmNote, handToAgent, mailFor, readMessage, readThread, searchMail, selfAppId, sendNew,
-  listMembersPage, sendReply, whatWeSell, type Mail, type PlatformEnv,
+  AppAnswerError, calendarPage, calendarRun, crmContactFor, crmLookupMany, crmNote, handToAgent, mailFor, readMessage, readThread, searchMail, selfAppId,
+  sendNew, listMembersPage, sendReply, whatWeSell, type Mail, type PlatformEnv,
 } from "./integrations.js";
 import {
-  DAY_MS, MINUTE_MS, PREPARE_AHEAD_MS, addressOf, addressesIn, bookedWith, coerceDraft, coerceReading, companyDomain,
+  DAY_MS, MINUTE_MS, PREPARE_AHEAD_MS, addressOf, addressesIn, audienceMismatch, bookedWith, coerceDraft, coerceReading, companyDomain, crmKeepOut,
   composeEmail, dailyCap, dayStart, draftPrompt, signatureFor, emailDomain, inboundKind, isInbound, localDay, needsOptOutCheck, nextSendAt, normaliseEmail,
   isInbox, leadPerson, leadVerdict, ownWords, prepareBudget, readingPrompt, researchBatch, researchInstruction, SOURCE_CHECK_MS, type GmailMessage,
-  type ListLead, type ResearchWaiting, type Window,
+  type CrmKnown, type ListLead, type ResearchWaiting, type Window,
 } from "./sequence-rules.js";
 import {
   OPEN_TOUCH, advance, cleanPerson, endEnrollments, enroll, getSettings, isPersonal, parts, personName, signatureBodies, skipOpenTouches, stepsOf,
@@ -100,6 +100,40 @@ async function openMail(ctx: Ctx): Promise<Mail | null> {
 }
 
 // ── The CRM ────────────────────────────────────────────────────────
+
+/** The CRM didn't answer a check: nobody joins a campaign on a guess. */
+export class CrmCheckError extends Error {}
+
+/**
+ * Who the CRM keeps out of a campaign, by key: anyone whose company is a
+ * customer, has a call booked or an open deal (crmKeepOut). Nobody when the
+ * campaign lets anyone in, no CRM is connected, or the CRM is too old to answer
+ * lookups (Review says so on each draft). One lookup for the lot. Throws
+ * CrmCheckError when the CRM doesn't answer.
+ */
+export async function crmKeptOut(
+  env: EngineEnv,
+  s: Settings,
+  campaign: { skip_known: number },
+  people: Array<{ key: string; email: string; domain: string }>,
+  now: Date,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const appId = crmAppOf(env, s);
+  if (!campaign.skip_known || !appId || !people.length) return out;
+  let known: CrmKnown[];
+  try {
+    known = await crmLookupMany(env, appId, people.map(({ email, domain }) => ({ email, domain })));
+  } catch (err) {
+    if (err instanceof AppAnswerError && err.status === 404 && err.code === "not_found") return out;
+    throw new CrmCheckError(`Couldn't check your CRM: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  people.forEach((p, i) => {
+    const reason = crmKeepOut(known[i], now, s.timezone);
+    if (reason) out.set(p.key, reason);
+  });
+  return out;
+}
 
 /** A line on the person's CRM timeline. Best effort: a CRM that can't be
  *  reached never holds up a send or a stop; the failure shows in Settings. */
@@ -446,6 +480,12 @@ async function pullLists(ctx: Ctx): Promise<void> {
             [c.id, lead.id, personId, normaliseEmail(lead.email).slice(0, 254) || null, outcome, reason, new Date().toISOString()]);
         for (let page = 1; page <= LIST_PAGES && room > 0; page++) {
           const r = await listMembersPage(ctx.env, c.source_app_id!, c.source_list_id!, page, c.audience === "inboxes" ? "inbox" : "person");
+          // Who the CRM keeps out, among the leads this page could give, in one lookup.
+          const fresh = r.members.filter((l) => !taken.has(l.id) && l.email && l.email_verified && !audienceMismatch(c.audience, l.email));
+          const keptOut = await crmKeptOut(ctx.env, ctx.s, c, fresh.map((l) => {
+            const email = normaliseEmail(l.email);
+            return { key: l.id, email, domain: companyDomain(email, isPersonal) };
+          }), ctx.now);
           for (const lead of r.members) {
             if (room <= 0) break;
             const domain = companyDomain(normaliseEmail(lead.email), isPersonal);
@@ -458,6 +498,12 @@ async function pullLists(ctx: Ctx): Promise<void> {
             }
             if (verdict !== "take") continue;
             taken.add(lead.id);
+            const out = keptOut.get(lead.id);
+            if (out) {
+              const known = await get<{ id: string }>("SELECT id FROM people WHERE email = ?", [normaliseEmail(lead.email)]);
+              await record(lead, known?.id ?? null, "skipped", out);
+              continue;
+            }
             const clean = cleanPerson(leadPerson(lead));
             if ("error" in clean) {
               await record(lead, null, "skipped", clean.error);
@@ -478,7 +524,9 @@ async function pullLists(ctx: Ctx): Promise<void> {
         }
       }
     } catch (e) {
-      error = `Couldn't read ${c.source_list_name ?? "the list"}: ${(e as Error).message}`.slice(0, 300);
+      error = (e instanceof CrmCheckError
+        ? `${e.message.replace(/\.$/, "")}. Nobody new was taken: it tries again in an hour`
+        : `Couldn't read ${c.source_list_name ?? "the list"}: ${(e as Error).message}`).slice(0, 300);
     }
     await run("UPDATE campaigns SET source_checked_at = ?, source_error = ? WHERE id = ?", [ctx.now.toISOString(), error, c.id]);
   }
