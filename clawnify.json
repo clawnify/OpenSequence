@@ -1,7 +1,7 @@
 {
   "$schema": "https://app.clawnify.com/schema/v1/clawnify.json",
   "version": 1,
-  "name": "OpenSequence",
+  "name": "Email sequences",
   "description": "Email sequences a person approves before they send: a researched first email, follow-ups in the same thread, and replies, bounces and booked meetings that stop the sequence. Best for outbound campaigns, cold email follow-ups and sales cadences, sent from a separate mailbox.",
   "icon": "icon.svg",
   "tags": ["outreach", "sales", "email", "sequences"],
