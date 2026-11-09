@@ -31,7 +31,7 @@ export function base64(bytes: Uint8Array): string {
 export async function decodeAttachment(input: { name: string; content_type: string; data_base64: string; source_url?: string }) {
   const name = input.name.trim();
   if (!name || name.length > 150 || /[\x00-\x1f\x7f"\\/]/.test(name)) throw new Error("Use a filename without slashes, quotes or control characters (up to 150 characters).");
-  if (!input.data_base64 || input.data_base64.length > Math.ceil(MAX_FILE_BYTES / 3) * 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(input.data_base64)) throw new Error("Provide a base64 file of at most 5 MB.");
+  if (!input.data_base64 || input.data_base64.length > Math.ceil(MAX_FILE_BYTES / 3) * 4 || input.data_base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(input.data_base64)) throw new Error("Provide a base64 file of at most 5 MB.");
   const bytes = Uint8Array.from(atob(input.data_base64), (c) => c.charCodeAt(0));
   if (!bytes.length || bytes.length > MAX_FILE_BYTES) throw new Error("Each file must be between 1 byte and 5 MB.");
   const starts = (sig: number[]) => sig.every((v, i) => bytes[i] === v);

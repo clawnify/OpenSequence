@@ -186,3 +186,14 @@ test('deleting a person also removes their stored attachment bytes', async () =>
   const f = fixture(); await f.upload(); assert.equal(f.objects.size, 1);
   assert.equal((await f.call('DELETE', '/api/people/p')).status, 200); assert.equal(f.objects.size, 0);
 });
+
+
+test('large supported uploads stay bounded and the total-size cap is enforced', async () => {
+  const f = fixture();
+  const bytes = Buffer.alloc(4 * 1024 * 1024); Buffer.from(png, 'base64').copy(bytes);
+  const data_base64 = bytes.toString('base64');
+  assert.equal((await f.upload({ ...file, data_base64, name: 'one.png' })).status, 200);
+  assert.equal((await f.upload({ ...file, data_base64, name: 'two.png' })).status, 200);
+  assert.equal((await f.upload({ ...file, data_base64, name: 'three.png' })).status, 400);
+  assert.equal(f.objects.size, 2);
+});
