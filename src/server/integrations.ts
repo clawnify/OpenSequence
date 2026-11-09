@@ -5,9 +5,10 @@
 // org token. Action slugs and argument shapes were run against the live
 // Composio catalogue on 2026-10-05.
 
+import { googleMail } from "./google-mail.js";
 import { createAgents } from "@clawnify/agents";
 import { offering, type OrgDocument } from "@clawnify/knowledge";
-import { accounts, connect, describe, type ConnectionsEnv } from "@clawnify/connections";
+import { accounts, connect, describe, type ConnectionsEnv, type RawRequest } from "@clawnify/connections";
 import type { CalendarEvent, CrmKnown, GmailMessage, ListLead } from "./sequence-rules.js";
 import { normaliseEmail } from "./sequence-rules.js";
 
@@ -28,6 +29,7 @@ export interface Mailbox {
 
 export interface Mail {
   address: string;
+  raw?(request: RawRequest): Promise<unknown>;
   run(action: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
@@ -57,6 +59,16 @@ export async function mailboxes(env: ConnectionsEnv): Promise<Mailbox[]> {
     const address = await profileAddress(gmail(env)).catch(() => "");
     if (address && !out.some((m) => m.address === address)) out.push({ address, isDefault: true });
   }
+  const google = await accounts(SERVICES.google, env);
+  for (const a of google) {
+    const mail = googleMail(env, "", a.account ?? undefined);
+    const address = await profileAddress(mail.run).catch(() => "");
+    if (address && !out.some((m) => m.address === address)) out.push({ address, isDefault: a.isDefault });
+  }
+  if (!google.length && (await connectedServices(env)).has(SERVICES.google)) {
+    const address = await profileAddress(googleMail(env, "").run).catch(() => "");
+    if (address && !out.some((m) => m.address === address)) out.push({ address, isDefault: true });
+  }
   return out;
 }
 
@@ -70,7 +82,18 @@ export async function mailFor(env: ConnectionsEnv, mailbox: string): Promise<Mai
   const address = normaliseEmail(mailbox);
   const listed = await accounts(SERVICES.mail, env);
   const named = listed.find((a) => a.account && normaliseEmail(a.account) === address);
-  if (named?.account) return { address, run: gmail(env, named.account) };
+  if (named?.account) return { address, run: gmail(env, named.account), raw: (req) => connect(SERVICES.mail, env, { account: named.account! }).rawRequest(req) };
+  // Workspace connections can have account ids unrelated to the mailbox.
+  // Verify the actual profile; never silently send from a different address.
+  const google = await accounts(SERVICES.google, env);
+  for (const a of google) {
+    const mail = googleMail(env, address, a.account ?? undefined);
+    if (await profileAddress(mail.run).catch(() => "") === address) return mail;
+  }
+  if (!google.length && (await connectedServices(env)).has(SERVICES.google)) {
+    const mail = googleMail(env, address);
+    if (await profileAddress(mail.run).catch(() => "") === address) return mail;
+  }
   const run = gmail(env);
   let actual = "";
   try {
@@ -81,7 +104,7 @@ export async function mailFor(env: ConnectionsEnv, mailbox: string): Promise<Mai
   if (actual !== address) {
     throw new Error(`${address} isn't connected in Clawnify (the default Gmail is ${actual}). Connect it, or pick another mailbox in Settings.`);
   }
-  return { address, run };
+  return { address, run, raw: (req) => connect(SERVICES.mail, env).rawRequest(req) };
 }
 
 /** What a send or a reply returns: the message and its thread. */
@@ -178,7 +201,7 @@ export async function calendarPage(
 export async function connectionStatus(env: ConnectionsEnv): Promise<{ mail: boolean; calendar: boolean }> {
   try {
     const connected = await connectedServices(env);
-    return { mail: connected.has(SERVICES.mail), calendar: connected.has(SERVICES.calendar) || connected.has(SERVICES.google) };
+    return { mail: connected.has(SERVICES.mail) || connected.has(SERVICES.google), calendar: connected.has(SERVICES.calendar) || connected.has(SERVICES.google) };
   } catch {
     return { mail: false, calendar: false };
   }

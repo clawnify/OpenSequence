@@ -104,7 +104,12 @@ export interface Source {
   note: string;
 }
 
+export interface Attachment {
+  id: string; name: string; content_type: string; size: number; sha256: string; source_url: string | null; url: string;
+}
+
 export interface Touch {
+  attachments: Attachment[];
   id: string;
   status: TouchStatus;
   channel: Channel;

@@ -117,6 +117,7 @@ export interface Touch {
   position: number;
   channel: Step["channel"];
   status: "research" | "drafting" | "review" | "approved" | "sending" | "sent" | "todo" | "done" | "skipped" | "failed";
+  attachments: string;
   draft_subject: string | null;
   draft_body: string | null;
   subject: string | null;

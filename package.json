@@ -7,7 +7,8 @@
     "db:migrate": "wrangler d1 execute open-sequence-db --local --file=src/server/schema.sql",
     "dev": "pnpm db:migrate && concurrently -n ui,api -c cyan,green \"vite\" \"wrangler dev --port 8787\"",
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test tests/attachments.mjs"
   },
   "dependencies": {
     "@clawnify/agents": "^0.1.1",
@@ -30,6 +31,7 @@
     "free-email-domains": "^1.9.62",
     "hono": "^4.6.0",
     "lucide-react": "^0.575.0",
+    "mimetext": "^3.0.28",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "tailwind-merge": "^2.2.0",

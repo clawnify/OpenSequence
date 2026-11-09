@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS touches (
   position INTEGER NOT NULL,                -- the step's number when the touch was made
   channel TEXT NOT NULL,                    -- 'email' | 'call' | 'linkedin' | 'task'
   status TEXT NOT NULL,                     -- email: 'research' | 'drafting' | 'review' | 'approved' | 'sending' | 'sent'; others: 'todo' | 'done'; any: 'skipped' | 'failed'
+  attachments TEXT NOT NULL DEFAULT '[]', -- immutable exported files attached to this email
   draft_subject TEXT,                       -- the draft as its writer wrote it (only an email that starts a thread has a subject)
   draft_body TEXT,
   subject TEXT,                             -- the draft as it stands, a reviewer's edits included

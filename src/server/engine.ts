@@ -14,6 +14,7 @@
 // Then the next run is booked. The rules live in sequence-rules.ts.
 
 import type { ConnectionsEnv } from "@clawnify/connections";
+import { loadAttachments, sendAttached, type AttachmentStore } from "./attachments.js";
 import { get, query, run } from "./db.js";
 import { bookableAt } from "./jobs.js";
 import { complete, ModelError, type AiEnv } from "./model.js";
@@ -33,6 +34,7 @@ import {
 } from "./store.js";
 
 export type EngineEnv = ConnectionsEnv & AiEnv & PlatformEnv & {
+  UPLOADS?: AttachmentStore;
   CLAWNIFY_QUEUE_URL?: string;
   /** Set by a bundle install next to a CRM: the default CRM to write to. */
   CRM_APP_ID?: string;
@@ -805,14 +807,24 @@ async function sendNext(ctx: Ctx, cap: number): Promise<Date | null> {
   const signature = signatureFor(e.thread_id ? "reply" : "first", campaign ?? { signature_id: null, reply_signature_id: null }, ctx.s, await signatureBodies());
   const out = composeEmail(ready.body ?? "", signature, ctx.s.opt_out);
   const body = out.body;
+  let files;
+  try {
+    files = await loadAttachments(ctx.env.UPLOADS, ready.id, ready.attachments);
+  } catch (err) {
+    await run("UPDATE touches SET status = 'review', approved_by = NULL, approved_at = NULL, error = ? WHERE id = ? AND status = 'approved' AND attachments = ?",
+      [(err as Error).message, ready.id, ready.attachments]);
+    return ctx.now;
+  }
   const claimed = await query<{ id: string }>(
     `UPDATE touches SET status = 'sending', sending_at = ?, sent_subject = ?, sent_body = ?, updated_at = datetime('now')
-      WHERE id = ? AND status = 'approved' RETURNING id`,
-    [ctx.now.toISOString(), subject, body, ready.id],
+      WHERE id = ? AND status = 'approved' AND attachments = ? AND subject IS ? AND body IS ? AND approved_at IS ? RETURNING id`,
+    [ctx.now.toISOString(), subject, body, ready.id, ready.attachments, ready.subject, ready.body, ready.approved_at],
   );
   if (!claimed.length) return ctx.now;
   try {
-    const sent = e.thread_id
+    const sent = files.length
+      ? await sendAttached(mail, ready.email, subject, body, out.html, files, e.thread_id)
+      : e.thread_id
       ? await sendReply(mail, ready.email, e.thread_id, body, out.html)
       : await sendNew(mail, ready.email, subject!, body, out.html);
     await markSent(ctx, ready, e, sent, new Date(), { subject, body });

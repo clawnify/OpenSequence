@@ -9,8 +9,8 @@
   "app": {
     "framework": "react+hono",
     "database": true,
-    "storage": false,
-    "credentials": ["gmail", "googlecalendar"]
+    "storage": true,
+    "credentials": ["gmail", "googlecalendar", "googlesuper"]
   },
 
   "env": {
