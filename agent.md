@@ -115,3 +115,18 @@ address. People carry `inbox: true` when their address is one.
 
 - The app's AI writes follow-ups and reads replies on the workspace's Clawnify
   credits. Your research is your own run.
+
+## Attachments and editable sources
+
+- For a step requesting a sketch, use the workspace's drawing app and retain
+  its editable source. A prospect does not need a workspace just to receive an image.
+- Read the touch first. Reuse its existing attachment/source on retries instead
+  of generating another drawing. Upload the final PNG before handing in the draft:
+  `POST /api/touches/{id}/attachments` (see the live API for the payload and limits).
+  Include `source_url` so a person can open the editable drawing for a later demo.
+- If an upload fails, do not hand in an email claiming the file is attached.
+  Report the failure. The email and files wait for a person to review together.
+- Only a person can change files after hand-in. Sent files are immutable;
+  editing the source drawing does not change the exported attachment.
+- A person approving through the API supplies `attachment_ids` in the order
+  returned on the touch. A changed list is refused so unseen files cannot be approved.

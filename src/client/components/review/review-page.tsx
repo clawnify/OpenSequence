@@ -8,6 +8,7 @@ import { withQuery, type Navigate, type ReviewTab } from "@/hooks/use-router";
 import { cn } from "@/lib/utils";
 import { CHANNEL_LABEL, ago, due, personName, plural } from "@/lib/format";
 import { Avatar, EmptyState, PageHeader, Pager, Pill } from "@/components/shared";
+import { Attachments } from "@/components/attachments";
 import { SignaturePreview } from "@/components/signature-preview";
 import { htmlToText, isHtml } from "@/lib/html";
 import { Notice } from "@/components/settings-ui";
@@ -249,6 +250,9 @@ function PersonHeader({ touch: t, navigate }: { touch: Touch; navigate: Navigate
 function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (id: string) => Promise<void> }) {
   const { overview, setError } = useApp();
   const t = detail.touch;
+  const [files, setFiles] = useState(t.attachments);
+  const [uploading, setUploading] = useState(false);
+  useEffect(() => setFiles(t.attachments), [t.attachments]);
   const [subject, setSubject] = useState(t.subject ?? "");
   const [body, setBody] = useState(t.body ?? "");
   const [busy, setBusy] = useState(false);
@@ -306,6 +310,8 @@ function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (i
         <label htmlFor="body" className="sr-only">Email</label>
         <Textarea id="body" value={body} onChange={(e) => setBody(e.target.value)} onBlur={save} disabled={approved || busy} rows={12}
           className="min-h-[14rem] resize-y rounded-none bg-transparent px-4 py-3 leading-relaxed shadow-none focus-visible:ring-0 focus-visible:ring-offset-0" />
+        <Attachments touchId={t.id} files={files} editable={!approved && canApprove && !busy}
+          onChange={setFiles} onError={setError} onBusy={setUploading} />
         {(signature || optOut) && (
           <div className="flex flex-col gap-2 border-t border-border px-4 py-2.5 text-[0.8125rem] text-faint">
             {signature && (isHtml(signature) ? <SignaturePreview html={signature} muted /> : <p className="whitespace-pre-wrap">{signature}</p>)}
@@ -326,9 +332,9 @@ function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (i
         </div>
       ) : note === null ? (
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="lg" disabled={busy || !canApprove || !body.trim() || (t.starts_thread && !subject.trim())}
+          <Button size="lg" disabled={busy || uploading || !canApprove || !body.trim() || (t.starts_thread && !subject.trim())}
             title={canApprove ? undefined : "Only a person signed in to Clawnify can approve"}
-            onClick={() => void act(() => api("POST", `/api/touches/${t.id}/approve`, t.starts_thread ? { subject, body } : { body }))}>
+            onClick={() => void act(() => api("POST", `/api/touches/${t.id}/approve`, { ...(t.starts_thread ? { subject, body } : { body }), attachment_ids: files.map((a) => a.id) }))}>
             <Check /> Approve
           </Button>
           <Button size="lg" variant="outline" disabled={busy} onClick={() => setNote("")}>Send back</Button>

@@ -1,4 +1,6 @@
 import { createApp, createRoute, widgets, z, caller, user, PageQuery, pageParams, pagedResponse } from "@clawnify/app";
+import { bodyLimit } from "hono/body-limit";
+import { attachmentsOf, attachmentView, attachmentKey, matchesAttachments, decodeAttachment, MAX_ATTACHMENTS, MAX_TOTAL_BYTES } from "./attachments.js";
 import { verifyDelivery } from "@clawnify/queue";
 import type { Context } from "hono";
 import type { CredentialBinding } from "@clawnify/connections";
@@ -129,6 +131,11 @@ const PersonSchema = z.object({
 
 const SourceSchema = z.object({ title: z.string(), url: z.string(), note: z.string() });
 
+const AttachmentSchema = z.object({
+  id: z.string(), name: z.string(), content_type: z.string(), size: z.number(), sha256: z.string(),
+  source_url: z.string().nullable(), url: z.string(),
+}).openapi("Attachment");
+
 const TouchSchema = z.object({
   id: z.string(),
   status: z.enum(["research", "drafting", "review", "approved", "sending", "sent", "todo", "done", "skipped", "failed"]),
@@ -137,6 +144,7 @@ const TouchSchema = z.object({
   total_steps: z.number().int(),
   subject: z.string().nullable().openapi({ description: "Only an email that starts a thread has one" }),
   body: z.string().nullable(),
+  attachments: z.array(AttachmentSchema),
   edited: z.boolean().openapi({ description: "A person changed the writer's draft" }),
   rationale: z.string().nullable(),
   sources: z.array(SourceSchema),
@@ -256,6 +264,7 @@ function touchView(r: TouchRow) {
     id: r.id, status: r.status, channel: r.channel, position: r.position, total_steps: r.total_steps,
     subject: r.status === "sent" ? r.sent_subject ?? r.subject : r.subject,
     body: r.body,
+    attachments: attachmentsOf(r.attachments).map((a) => attachmentView(r.id, a)),
     edited: r.draft_body !== null && (r.body !== r.draft_body || (r.subject ?? null) !== (r.draft_subject ?? null)),
     rationale: r.rationale, sources: sourcesOf(r.sources), written_by: r.written_by, review_note: r.review_note, error: r.error,
     instructions: r.instructions ?? "", writer: (r.writer ?? "thread") as "research" | "thread",
@@ -977,7 +986,10 @@ app.delete("/api/people/:id", async (c) => {
   const p = await get<Person>("SELECT * FROM people WHERE id = ?", [id]);
   if (!p) return c.json({ error: "No such person" }, 404);
   if (p.unsubscribed_at) return c.json({ error: "They asked not to be emailed: the record stays so they never are" }, 409);
+  const files = await query<{ id: string; attachments: string }>(
+    "SELECT t.id, t.attachments FROM touches t JOIN enrollments e ON e.id = t.enrollment_id WHERE e.person_id = ?", [id]);
   await run("DELETE FROM people WHERE id = ?", [id]);
+  for (const t of files) for (const a of attachmentsOf(t.attachments)) await c.env.UPLOADS?.delete(attachmentKey(t.id, a.id));
   return c.json({ ok: true }, 200);
 });
 
@@ -1190,6 +1202,105 @@ function cleanText(v: unknown, field: string, max: number, required: boolean): s
   return t;
 }
 
+// Attachments belong to one touch. Bytes never change; replacing a file is a
+// remove/add and invalidates approval. No arbitrary URL is fetched by this API.
+app.use("/api/touches/:id/attachments", bodyLimit({ maxSize: 7 * 1024 * 1024,
+  onError: (c) => c.json({ error: "Each attachment must be at most 5 MB." }, 413) }));
+
+function attachmentPermission(c: C, t: TouchRow): string | null {
+  if (!mayWrite(c)) return "Sign in to change attachments.";
+  if (t.channel !== "email" || !["research", "drafting", "review", "approved"].includes(t.status) || t.e_status !== "active") return "This email no longer accepts attachments.";
+  if (["review", "approved"].includes(t.status) && !isPerson(c)) return "Only a person can change an email after its writer handed it in.";
+  return null;
+}
+
+const uploadAttachment = createRoute({
+  method: "post", path: "/api/touches/{id}/attachments", tags: ["Touches"],
+  summary: "Attach an immutable PNG, JPEG or PDF before handing in a draft. Repeating the same file reuses it. Changing an approved email requires fresh approval.",
+  request: { params: z.object({ id: z.string() }), body: { content: { "application/json": { schema: z.object({
+    name: z.string().max(150), content_type: z.enum(["image/png", "image/jpeg", "application/pdf"]),
+    data_base64: z.string().max(6990508).openapi({ description: "File bytes as base64, at most 5 MB before encoding; no data URL prefix" }),
+    source_url: z.string().max(2000).optional().openapi({ description: "HTTPS link to the editable source, retained for later reuse; never fetched or emailed" }),
+  }) } } } },
+  responses: {
+    200: { description: "Attached (or already attached)", content: { "application/json": { schema: z.object({ attachment: AttachmentSchema, touch: TouchSchema }) } } },
+    400: { description: "Invalid file", content: { "application/json": { schema: ErrorSchema } } },
+    403: { description: "Not permitted", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "No such email", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Email changed or no longer editable", content: { "application/json": { schema: ErrorSchema } } },
+    503: { description: "Storage unavailable", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+app.openapi(uploadAttachment, async (c) => {
+  const { id } = c.req.valid("param");
+  const t = await touchById(id);
+  if (!t) return c.json({ error: "No such touch" }, 404);
+  const denied = attachmentPermission(c, t);
+  if (denied) return c.json({ error: denied }, 403);
+  if (!c.env.UPLOADS) return c.json({ error: "Attachment storage is unavailable. Update this app with storage enabled." }, 503);
+  let decoded;
+  try { decoded = await decodeAttachment(c.req.valid("json")); }
+  catch (err) { return c.json({ error: (err as Error).message }, 400); }
+  const { bytes, meta } = decoded;
+  const files = attachmentsOf(t.attachments);
+  const duplicate = files.find((a) => a.sha256 === meta.sha256 && a.name === meta.name && a.content_type === meta.content_type && a.source_url === meta.source_url);
+  if (duplicate) return c.json({ attachment: attachmentView(id, duplicate), touch: touchView(t) }, 200);
+  if (files.length >= MAX_ATTACHMENTS || files.reduce((n, a) => n + a.size, 0) + meta.size > MAX_TOTAL_BYTES) return c.json({ error: "At most 5 attachments and 10 MB total per email." }, 400);
+  const key = attachmentKey(id, meta.id);
+  await c.env.UPLOADS.put(key, bytes, { httpMetadata: { contentType: meta.content_type } });
+  const changed = await query<{ id: string }>(
+    `UPDATE touches SET attachments = ?, status = CASE WHEN status = 'approved' THEN 'review' ELSE status END,
+       approved_at = NULL, approved_by = NULL, updated_at = datetime('now')
+     WHERE id = ? AND status = ? AND attachments = ?
+       AND EXISTS (SELECT 1 FROM enrollments e WHERE e.id = touches.enrollment_id AND e.status = 'active') RETURNING id`,
+    [JSON.stringify([...files, meta]), id, t.status, t.attachments]);
+  if (!changed.length) {
+    await c.env.UPLOADS.delete(key);
+    return c.json({ error: "The email changed during upload. Reload it before retrying." }, 409);
+  }
+  return c.json({ attachment: attachmentView(id, meta), touch: touchView((await touchById(id))!) }, 200);
+});
+
+app.get("/api/touches/:id/attachments/:attachment", async (c) => {
+  if (!["user", "api", "agent", "app", "agent-browser"].includes(caller(c) ?? "")) return c.json({ error: "Sign in to read attachments." }, 403);
+  const t = await touchById(c.req.param("id"));
+  const a = t && attachmentsOf(t.attachments).find((a) => a.id === c.req.param("attachment"));
+  if (!t || !a) return c.json({ error: "No such attachment" }, 404);
+  const file = await c.env.UPLOADS?.get(attachmentKey(t.id, a.id));
+  if (!file) return c.json({ error: "Attachment file unavailable" }, 404);
+  return new Response(await file.arrayBuffer(), { headers: {
+    "Content-Type": a.content_type, "Content-Disposition": `${a.content_type.startsWith("image/") ? "inline" : "attachment"}; filename*=UTF-8''${encodeURIComponent(a.name)}`,
+    "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "default-src 'none'; sandbox",
+  } });
+});
+
+const removeAttachment = createRoute({
+  method: "delete", path: "/api/touches/{id}/attachments/{attachment}", tags: ["Touches"],
+  summary: "Remove a draft attachment; an approved email returns to review",
+  request: { params: z.object({ id: z.string(), attachment: z.string() }) },
+  responses: { 200: { description: "Removed", content: { "application/json": { schema: z.object({ touch: TouchSchema }) } } },
+    403: { description: "Not permitted", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Email changed", content: { "application/json": { schema: ErrorSchema } } } },
+});
+app.openapi(removeAttachment, async (c) => {
+  const { id, attachment } = c.req.valid("param");
+  const t = await touchById(id);
+  if (!t) return c.json({ error: "No such touch" }, 404);
+  const denied = attachmentPermission(c, t);
+  if (denied) return c.json({ error: denied }, 403);
+  const files = attachmentsOf(t.attachments);
+  if (!files.some((a) => a.id === attachment)) return c.json({ error: "No such attachment" }, 404);
+  const changed = await query<{ id: string }>(
+    `UPDATE touches SET attachments = ?, status = CASE WHEN status = 'approved' THEN 'review' ELSE status END,
+       approved_at = NULL, approved_by = NULL, updated_at = datetime('now')
+     WHERE id = ? AND status = ? AND attachments = ? RETURNING id`,
+    [JSON.stringify(files.filter((a) => a.id !== attachment)), id, t.status, t.attachments]);
+  if (!changed.length) return c.json({ error: "The email changed. Reload before retrying." }, 409);
+  await c.env.UPLOADS?.delete(attachmentKey(id, attachment));
+  return c.json({ touch: touchView((await touchById(id))!) }, 200);
+});
+
 const depositDraft = createRoute({
   method: "put",
   path: "/api/touches/{id}/draft",
@@ -1258,10 +1369,11 @@ app.patch("/api/touches/:id", async (c) => {
     if (subject && typeof subject === "object") return c.json(subject, 400);
     const text = b.body === undefined ? t.body : cleanText(b.body, "body", 5000, true);
     if (text && typeof text === "object") return c.json(text, 400);
-    await run(
-      "UPDATE touches SET subject = ?, body = ?, status = 'review', approved_by = NULL, approved_at = NULL, updated_at = datetime('now') WHERE id = ?",
-      [subject, text, id],
+    const edited = await query<{ id: string }>(
+      "UPDATE touches SET subject = ?, body = ?, status = 'review', approved_by = NULL, approved_at = NULL, updated_at = datetime('now') WHERE id = ? AND status = ? AND attachments = ? RETURNING id",
+      [subject, text, id, t.status, t.attachments],
     );
+    if (!edited.length) return c.json({ error: "The email changed. Reload before editing." }, 409);
     return c.json({ touch: touchView((await touchById(id))!) }, 200);
   } catch (err) {
     return fail(c, err);
@@ -1278,16 +1390,18 @@ app.post("/api/touches/:id/approve", async (c) => {
     if (t.status !== "review") return c.json({ error: `This touch is ${t.status}, not waiting for approval` }, 409);
     if (t.e_status !== "active") return c.json({ error: `${t.email} is no longer being written to (${t.e_status})` }, 409);
     const b = await body(c);
+    if (!matchesAttachments(t.attachments, b.attachment_ids)) return c.json({ error: "The attachments changed. Reload and review them before approving." }, 409);
     const startsThread = touchView(t).starts_thread;
     const subject = startsThread ? cleanText(b.subject ?? t.subject, "subject", 150, true) : null;
     if (subject && typeof subject === "object") return c.json(subject, 400);
     const text = cleanText(b.body ?? t.body, "body", 5000, true);
     if (text && typeof text === "object") return c.json(text, 400);
-    await run(
+    const approved = await query<{ id: string }>(
       `UPDATE touches SET subject = ?, body = ?, status = 'approved', approved_by = ?, approved_at = datetime('now'), error = NULL, updated_at = datetime('now')
-        WHERE id = ? AND status = 'review'`,
-      [subject, text, who(c), id],
+        WHERE id = ? AND status = 'review' AND attachments = ? RETURNING id`,
+      [subject, text, who(c), id, t.attachments],
     );
+    if (!approved.length) return c.json({ error: "The email changed. Reload and review it again." }, 409);
     await kick(c);
     return c.json({ touch: touchView((await touchById(id))!) }, 200);
   } catch (err) {
@@ -1308,7 +1422,7 @@ app.post("/api/touches/:id/send-back", async (c) => {
     const status = t.writer === "research" ? "research" : "drafting";
     await run(
       `UPDATE touches SET status = ?, review_note = ?, attempts = 0, error = NULL, approved_by = NULL, approved_at = NULL,
-         research_sent_at = NULL, research_agent_id = NULL, research_tries = 0, research_task_id = NULL, updated_at = datetime('now') WHERE id = ?`,
+         research_sent_at = NULL, research_agent_id = NULL, research_tries = 0, research_task_id = NULL, updated_at = datetime('now') WHERE id = ? AND status IN ('review', 'approved')`,
       [status, note, id],
     );
     await kick(c);
