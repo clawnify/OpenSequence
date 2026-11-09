@@ -76,6 +76,7 @@ export function SettingsPage() {
   }
   const s = v.settings;
   const can = v.can_configure && !busy;
+  const mailboxUnavailable = !!s.mailbox && !v.mailboxes.some((m) => m.address === s.mailbox);
   const crmOptions = [
     { value: "", label: "None" },
     ...v.crm_apps.map((a) => ({ value: a.id, label: a.name })),
@@ -102,6 +103,7 @@ export function SettingsPage() {
 
           <Section title="Sending">
             {!v.connections.mail && <Notice>Gmail isn't connected. Connect it in Clawnify (Settings, Integrations), then pick the mailbox here.</Notice>}
+            {mailboxUnavailable && <Notice>{s.mailbox} is saved, but its connection is unavailable. Nothing can be sent from it. Reconnect it in Clawnify or choose a connected mailbox below.</Notice>}
             <Rows label="Sending">
               <Row
                 title="Send from"
@@ -141,7 +143,7 @@ export function SettingsPage() {
               </Row>
             </Rows>
             <p className="text-[0.8125rem] text-muted-foreground">
-              {v.sending.mailbox
+              {mailboxUnavailable ? "Sending is blocked until the mailbox is reconnected or replaced. " : v.sending.mailbox
                 ? `Today ${v.sending.sent_today} of ${v.sending.cap_today} sent; the next one can go ${due(v.sending.next_send_at)}. `
                 : "Nothing goes out until a mailbox is picked. "}
               {v.sending.last_run_at ? `Replies and booked meetings were last checked ${ago(v.sending.last_run_at)}.` : "Replies and booked meetings haven't been checked yet."}

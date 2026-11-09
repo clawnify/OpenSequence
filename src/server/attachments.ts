@@ -69,7 +69,15 @@ export async function sendAttached(mail: Mail, to: string, subject: string | nul
   files: Array<Attachment & { data: string }>, threadId: string | null): Promise<Sent> {
   if (!mail.raw) throw new Error("This mailbox cannot send attachments.");
   const msg = createMimeMessage();
-  msg.setSender(mail.address);
+  const identity = await mail.run("SETTINGS_SEND_AS_GET", { user_id: "me", send_as_email: mail.address }) as { displayName?: string; isPrimary?: boolean } | null;
+  let name = identity?.displayName?.trim() ?? "";
+  // A primary Gmail address can inherit its name from the Google profile.
+  // Read it through this same account, never from the person operating Sequence.
+  if (!name && identity?.isPrimary) {
+    const profile = await mail.raw({ method: "GET", endpoint: "/oauth2/v2/userinfo" }).catch(() => null) as { email?: string; name?: string } | null;
+    if (profile?.email?.toLowerCase() === mail.address.toLowerCase()) name = profile.name?.trim() ?? "";
+  }
+  msg.setSender({ addr: mail.address, name: name.replace(/[\r\n\x00-\x1f\x7f]/g, " ").trim() || undefined });
   msg.setTo(to);
   if (threadId) {
     const thread = await mail.raw({ method: "GET", endpoint: `/gmail/v1/users/me/threads/${encodeURIComponent(threadId)}`,

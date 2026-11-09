@@ -39,7 +39,9 @@ function fixture() {
     async listConnected() { return ['gmail']; },
     async listConnections() { return [{ service: 'gmail', account: 'sender@example.com', label: 'Sender', isDefault: true }]; },
     async executeTool(service, action, args) {
-      const data = action === 'GMAIL_FETCH_MESSAGE_BY_THREAD_ID' ? { messages: incoming }
+      const data = action === 'GMAIL_GET_PROFILE' ? { emailAddress: 'sender@example.com' }
+        : action === 'GMAIL_SETTINGS_SEND_AS_GET' ? { displayName: 'Test Sender', isPrimary: true }
+        : action === 'GMAIL_FETCH_MESSAGE_BY_THREAD_ID' ? { messages: incoming }
         : action === 'GMAIL_FETCH_EMAILS' ? { messages: [] }
         : action === 'GMAIL_SEND_EMAIL' ? (sends.push({ plain: args }), { id: 'sent', threadId: 'thread' }) : {};
       return { data, successful: true, error: null };
@@ -196,4 +198,46 @@ test('large supported uploads stay bounded and the total-size cap is enforced', 
   assert.equal((await f.upload({ ...file, data_base64, name: 'two.png' })).status, 200);
   assert.equal((await f.upload({ ...file, data_base64, name: 'three.png' })).status, 400);
   assert.equal(f.objects.size, 2);
+});
+
+test('raw Gmail sends carry the configured sender name on new mail and replies', async () => {
+  const f = fixture();
+  const mail = await mailFor(f.env, 'sender@example.com');
+  for (const thread of [null, 'thread']) {
+    await sendAttached(mail, 'recipient@example.com', 'Name check', 'Hello', false, [], thread);
+    const mime = Buffer.from(f.sends.at(-1).raw, 'base64url').toString();
+    assert.match(mime, /^From: .*<sender@example.com>/m);
+    const from = mime.match(/^From: (.+)$/m)[1];
+    const name = from.replace(/=\?UTF-8\?B\?([^?]+)\?=/gi, (_, b) => Buffer.from(b, 'base64').toString());
+    assert.ok(name.includes('Test Sender'), name);
+  }
+});
+
+test('primary Gmail inherits its own Google profile name, never another account name', async () => {
+  const f = fixture(); const mail = await mailFor(f.env, 'sender@example.com');
+  mail.run = async () => ({ displayName: '', isPrimary: true });
+  const raw = mail.raw;
+  let profileEmail = mail.address;
+  mail.raw = async (req) => req.endpoint === '/oauth2/v2/userinfo' ? { email: profileEmail, name: 'Renée Example' } : raw(req);
+  await sendAttached(mail, 'recipient@example.com', 'Name check', 'Hello', false, [], null);
+  const from = Buffer.from(f.sends.at(-1).raw, 'base64url').toString().match(/^From: (.+)$/m)[1];
+  assert.ok(from.replace(/=\?UTF-8\?B\?([^?]+)\?=/gi, (_, b) => Buffer.from(b, 'base64').toString()).includes('Renée Example'), from);
+  profileEmail = 'other@example.com';
+  await sendAttached(mail, 'recipient@example.com', 'Name check', 'Hello', false, [], null);
+  assert.match(Buffer.from(f.sends.at(-1).raw, 'base64url').toString(), /^From: <sender@example.com>\r?$/m);
+});
+
+test('unavailable or mismatched saved mailboxes cannot be selected or reported ready', async () => {
+  const f = fixture(); const original = f.env.CREDENTIALS.executeTool;
+  f.env.CREDENTIALS.executeTool = async (service, action, args) => action === 'GMAIL_GET_PROFILE'
+    ? { successful: true, data: { emailAddress: 'different@example.com' } } : original(service, action, args);
+  assert.deepEqual(await mailboxes(f.env), []);
+  await assert.rejects(() => mailFor(f.env, 'sender@example.com'), /couldn't be verified/);
+  const save = await f.call('PUT', '/api/settings', { mailbox: 'sender@example.com' });
+  assert.equal(save.status, 400);
+  assert.match(save.data.error, /isn't a Gmail account connected/);
+  assert.equal((await f.call('GET', '/api/overview')).data.ready.mailbox, false);
+  assert.equal(f.db.prepare('SELECT mailbox FROM settings').get().mailbox, 'sender@example.com');
+  f.env.CREDENTIALS.executeTool = original;
+  assert.equal((await f.call('GET', '/api/overview')).data.ready.mailbox, true);
 });

@@ -51,9 +51,11 @@ function gmail(env: ConnectionsEnv, account?: string): Mail["run"] {
  */
 export async function mailboxes(env: ConnectionsEnv): Promise<Mailbox[]> {
   const listed = await accounts(SERVICES.mail, env);
-  const out: Mailbox[] = listed
-    .filter((a) => a.account)
-    .map((a) => ({ address: normaliseEmail(a.account), isDefault: a.isDefault }));
+  const out: Mailbox[] = [];
+  for (const a of listed.filter((a) => a.account)) {
+    const address = await profileAddress(gmail(env, a.account!)).catch(() => "");
+    if (address && address === normaliseEmail(a.account) && !out.some((m) => m.address === address)) out.push({ address, isDefault: a.isDefault });
+  }
   const unnamed = listed.some((a) => !a.account) || (listed.length === 0 && (await connectedServices(env)).has(SERVICES.mail));
   if (unnamed) {
     const address = await profileAddress(gmail(env)).catch(() => "");
@@ -82,7 +84,11 @@ export async function mailFor(env: ConnectionsEnv, mailbox: string): Promise<Mai
   const address = normaliseEmail(mailbox);
   const listed = await accounts(SERVICES.mail, env);
   const named = listed.find((a) => a.account && normaliseEmail(a.account) === address);
-  if (named?.account) return { address, run: gmail(env, named.account), raw: (req) => connect(SERVICES.mail, env, { account: named.account! }).rawRequest(req) };
+  if (named?.account) {
+    const run = gmail(env, named.account);
+    if (await profileAddress(run).catch(() => "") !== address) throw new Error(`${address} couldn't be verified in Clawnify. Reconnect it, or pick another mailbox in Settings.`);
+    return { address, run, raw: (req) => connect(SERVICES.mail, env, { account: named.account! }).rawRequest(req) };
+  }
   // Workspace connections can have account ids unrelated to the mailbox.
   // Verify the actual profile; never silently send from a different address.
   const google = await accounts(SERVICES.google, env);
