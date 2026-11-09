@@ -92,7 +92,7 @@ export function ReviewPage({ tab, touchId, navigate }: { tab: ReviewTab; touchId
       <div className="flex shrink-0 flex-col gap-2 border-b border-border px-4 py-2.5 md:px-6">
         {overview && !overview.ready.mailbox && (
           <Notice action={<Button size="sm" variant="outline" onClick={() => navigate("/settings")}>Settings</Button>}>
-            Nothing goes out until you pick the mailbox to send from.
+            {sending?.mailbox ? `${sending.mailbox} is unavailable. Reconnect it or pick a connected mailbox in Settings.` : "Nothing goes out until you pick a connected mailbox to send from."}
           </Notice>
         )}
         {overview && overview.ready.mailbox && !overview.ready.about && (

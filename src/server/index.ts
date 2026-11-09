@@ -323,7 +323,7 @@ app.get("/api/overview", async (c) => {
       counts: await counts(),
       sending: await sendingView(s),
       ready: {
-        mailbox: !!s.mailbox,
+        mailbox: !!s.mailbox && await mailFor(c.env, s.mailbox).then(() => true, () => false),
         about: !!s.about.trim() || (await whatWeSell(c.env, s.about).then((r) => !!r.text, () => true)),
       },
       crm: !!crmAppOf(c.env, s),
