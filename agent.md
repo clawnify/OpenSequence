@@ -58,6 +58,11 @@ filling; the app takes the people itself, each hour, up to the number a day.
   up to 500 at a time. An address already here is filled in, not duplicated.
   Put the evidence in `notes`, with links: the writer works from it.
 - People already here: `POST /api/campaigns/{id}/enroll` `{ "emails": [...] }`.
+- Someone emailed them from the campaign mailbox already (by hand, in Gmail):
+  `GET /api/enrollments/{id}/sent-by-hand` lists those emails for their current
+  step, and `POST /api/enrollments/{id}/sent-by-hand` `{ "message_id" }` counts
+  one as that step. Follow-ups then reply in its thread. Do this when the person
+  says they wrote to someone; never write that email again as a draft.
 - Skipped people come back with the reason: asked not to be emailed, bounced,
   already in another live campaign, the wrong kind of address for the
   campaign (below), or known to the CRM ("In your CRM: …": their company is a
