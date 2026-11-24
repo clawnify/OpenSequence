@@ -1,6 +1,6 @@
 import { createApp, createRoute, widgets, z, caller, user, PageQuery, pageParams, pagedResponse } from "@clawnify/app";
 import { bodyLimit } from "hono/body-limit";
-import { attachmentsOf, attachmentView, attachmentKey, matchesAttachments, decodeAttachment, MAX_ATTACHMENTS, MAX_TOTAL_BYTES } from "./attachments.js";
+import { attachmentsOf, attachmentView, attachmentKey, matchesAttachments, attachmentFromBytes, decodeAttachment, MAX_ATTACHMENTS, MAX_TOTAL_BYTES } from "./attachments.js";
 import { verifyDelivery } from "@clawnify/queue";
 import type { Context } from "hono";
 import type { CredentialBinding } from "@clawnify/connections";
@@ -1281,14 +1281,25 @@ function attachmentPermission(c: C, t: TouchRow): string | null {
   return null;
 }
 
+const AttachmentForm = z.object({
+  file: z.any().openapi({ type: "string", format: "binary", description: "The PNG, JPEG or PDF, at most 5 MB" }),
+  name: z.string().max(150).optional().openapi({ description: "Default: the file's own name" }),
+  content_type: z.enum(["image/png", "image/jpeg", "application/pdf"]).optional().openapi({ description: "Default: the part's own type" }),
+  source_url: z.string().max(2000).optional().openapi({ description: "HTTPS link to the editable source, retained for later reuse; never fetched or emailed" }),
+});
+const AttachmentJson = z.object({
+  name: z.string().max(150), content_type: z.enum(["image/png", "image/jpeg", "application/pdf"]),
+  data_base64: z.string().max(6990508).openapi({ description: "File bytes as base64, at most 5 MB before encoding; no data URL prefix" }),
+  source_url: z.string().max(2000).optional().openapi({ description: "HTTPS link to the editable source, retained for later reuse; never fetched or emailed" }),
+});
+
 const uploadAttachment = createRoute({
   method: "post", path: "/api/touches/{id}/attachments", tags: ["Touches"],
-  summary: "Attach an immutable PNG, JPEG or PDF before handing in a draft. Repeating the same file reuses it. Changing an approved email requires fresh approval.",
-  request: { params: z.object({ id: z.string() }), body: { content: { "application/json": { schema: z.object({
-    name: z.string().max(150), content_type: z.enum(["image/png", "image/jpeg", "application/pdf"]),
-    data_base64: z.string().max(6990508).openapi({ description: "File bytes as base64, at most 5 MB before encoding; no data URL prefix" }),
-    source_url: z.string().max(2000).optional().openapi({ description: "HTTPS link to the editable source, retained for later reuse; never fetched or emailed" }),
-  }) } } } },
+  summary: "Attach an immutable PNG, JPEG or PDF before handing in a draft: a multipart/form-data upload (part \"file\") or JSON with base64. Repeating the same file reuses it. Changing an approved email requires fresh approval.",
+  request: { params: z.object({ id: z.string() }), body: { content: {
+    "multipart/form-data": { schema: AttachmentForm },
+    "application/json": { schema: AttachmentJson },
+  } } },
   responses: {
     200: { description: "Attached (or already attached)", content: { "application/json": { schema: z.object({ attachment: AttachmentSchema, touch: TouchSchema }) } } },
     400: { description: "Invalid file", content: { "application/json": { schema: ErrorSchema } } },
@@ -1306,7 +1317,18 @@ app.openapi(uploadAttachment, async (c) => {
   if (denied) return c.json({ error: denied }, 403);
   if (!c.env.UPLOADS) return c.json({ error: "Attachment storage is unavailable. Update this app with storage enabled." }, 503);
   let decoded;
-  try { decoded = await decodeAttachment(c.req.valid("json")); }
+  try {
+    if ((c.req.header("content-type") ?? "").toLowerCase().startsWith("multipart/form-data")) {
+      // The library types both bodies as one union; the content type says which this is.
+      const form = c.req.valid("form") as z.infer<typeof AttachmentForm>;
+      const file = form.file as unknown;
+      if (!(file instanceof File)) throw new Error('Send the file as the multipart part "file".');
+      decoded = await attachmentFromBytes({
+        name: form.name ?? file.name, content_type: form.content_type ?? file.type, source_url: form.source_url,
+        bytes: new Uint8Array(await file.arrayBuffer()),
+      });
+    } else decoded = await decodeAttachment(c.req.valid("json") as z.infer<typeof AttachmentJson>);
+  }
   catch (err) { return c.json({ error: (err as Error).message }, 400); }
   const { bytes, meta } = decoded;
   const files = attachmentsOf(t.attachments);

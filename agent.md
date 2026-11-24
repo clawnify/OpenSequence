@@ -127,7 +127,11 @@ address. People carry `inbox: true` when their address is one.
   its editable source. A prospect does not need a workspace just to receive an image.
 - Read the touch first. Reuse its existing attachment/source on retries instead
   of generating another drawing. Upload the final PNG before handing in the draft:
-  `POST /api/touches/{id}/attachments` (see the live API for the payload and limits).
+  `POST /api/touches/{id}/attachments` as multipart/form-data, the file in the part
+  `file` and `source_url` as a field. On a Clawnify agent that is `clawnify_call_app_api`
+  with `files: [{ "field": "file", "path": "<the PNG on disk>" }]` and
+  `body: { "source_url": "..." }`: the tool reads the file, so never paste its base64.
+  JSON with `data_base64` still works for a client that has only bytes in hand.
   Include `source_url` so a person can open the editable drawing for a later demo.
 - If an upload fails, do not hand in an email claiming the file is attached.
   Report the failure. The email and files wait for a person to review together.
