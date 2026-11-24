@@ -12,7 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { InlineField } from "@/components/ui/inline-field";
 import { Picker } from "@/components/ui/picker";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import type { Campaign, EnrollResult, HandSent, Page, Person, PersonDetail } from "@/types";
+import type { Campaign, EnrollResult, HandSent, Page, Person, PersonDetail, Touch } from "@/types";
 
 const TOUCH_LABEL: Record<string, string> = {
   research: "Waiting for research",
@@ -252,8 +252,9 @@ function SentByHandDialog({ enrollmentId, step, email, onClose, onDone }: {
   const count = async () => {
     setBusy(true);
     try {
-      const r = await api<{ replies: number }>("POST", `/api/enrollments/${encodeURIComponent(enrollmentId)}/sent-by-hand`, { message_id: picked });
-      if (r.replies) setError("They already replied in that thread, so the sequence stopped for them.");
+      const r = await api<{ touch: Touch; replies: number }>("POST", `/api/enrollments/${encodeURIComponent(enrollmentId)}/sent-by-hand`, { message_id: picked });
+      const after = r.touch.enrollment;
+      if (r.replies) setError(`Counted. They had already written in that thread: ${after.reason ?? ENROLLMENT_STATUS[after.status].label}.`);
       onDone();
     } catch (e) {
       setProblem(e instanceof Error ? e.message : "That didn't work");

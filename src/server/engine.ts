@@ -551,9 +551,12 @@ async function prepare(ctx: Ctx, cap: number): Promise<void> {
   );
   for (const d of due) {
     const status = d.channel !== "email" ? "todo" : d.writer === "research" ? "research" : "drafting";
+    // Checked again as it is written: an email counted by hand may have taken the step since.
     await run(
-      "INSERT INTO touches (id, enrollment_id, step_id, position, channel, status) VALUES (?, ?, ?, ?, ?, ?)",
-      [crypto.randomUUID(), d.id, d.step_id, d.step, d.channel, status],
+      `INSERT INTO touches (id, enrollment_id, step_id, position, channel, status) SELECT ?, ?, ?, ?, ?, ?
+        WHERE EXISTS (SELECT 1 FROM enrollments WHERE id = ? AND step = ? AND status = 'active')
+          AND NOT EXISTS (SELECT 1 FROM touches WHERE enrollment_id = ? AND position = ? AND status NOT IN ('skipped', 'failed'))`,
+      [crypto.randomUUID(), d.id, d.step_id, d.step, d.channel, status, d.id, d.step, d.id, d.step],
     );
   }
 }
@@ -846,8 +849,10 @@ export async function sentByHand(env: EngineEnv, enrollmentId: string, now = new
 /**
  * Counts one email the mailbox sent the person as their current step: it is
  * recorded as sent, its thread becomes the sequence's, and the next step falls
- * due from its date. An open draft for the step is skipped. A reply already in
- * the thread is recorded too, which stops the sequence as any reply does.
+ * due from its date. An open draft for the step is skipped. Anything they
+ * wrote in the thread, whenever, is recorded as what came back, as a send
+ * does when it reads the thread: a reply stops the sequence, an automatic
+ * answer pauses it, a bounce stops the address.
  */
 export async function countSentByHand(
   env: EngineEnv, enrollmentId: string, messageId: string, by: string | null, now = new Date(),
@@ -856,8 +861,8 @@ export async function countSentByHand(
   let m: GmailMessage;
   try {
     m = await readMessage(mail, messageId);
-  } catch {
-    throw new HandSentError(`No email ${messageId} in ${mail.address}`, 404);
+  } catch (err) {
+    throw new HandSentError(`Couldn't read that email from ${mail.address}: ${(err as Error).message}`, 409);
   }
   if (!m.messageId || !m.threadId) throw new HandSentError(`No email ${messageId} in ${mail.address}`, 404);
   if (!(m.labelIds ?? []).includes("SENT") || addressOf(m.sender ?? header(m, "From")) !== mail.address) {
@@ -880,28 +885,36 @@ export async function countSentByHand(
   const subject = e.thread_id ? null : (m.subject ?? header(m, "Subject") ?? "").trim() || null;
   const text = m.messageText ?? m.preview?.body ?? "";
   const id = crypto.randomUUID();
-  // Only while the person is still on this step and nothing else went out for it.
+  // In one statement, so a run or another count can't take the step, the
+  // email or the thread in between: the person is still on this step, nothing
+  // went out for it, the email isn't counted, and no other sequence owns the
+  // thread. A send claims its step under the same conditions.
   const inserted = await query<{ id: string }>(
     `INSERT INTO touches (id, enrollment_id, step_id, position, channel, status, subject, body, sent_subject, sent_body, written_by, message_id, sent_at, done_by)
      SELECT ?, ?, ?, ?, 'email', 'sent', ?, ?, ?, ?, 'person', ?, ?, ?
       WHERE EXISTS (SELECT 1 FROM enrollments WHERE id = ? AND step = ? AND status IN ('active', 'paused'))
         AND NOT EXISTS (SELECT 1 FROM touches WHERE enrollment_id = ? AND position = ? AND status IN ('sending', 'sent'))
+        AND NOT EXISTS (SELECT 1 FROM touches WHERE message_id = ?)
+        AND NOT EXISTS (SELECT 1 FROM enrollments WHERE thread_id = ? AND id != ?)
      RETURNING id`,
-    [id, e.id, step.id, e.step, subject, ownWords(text, 5000), subject, text.slice(0, 20_000), m.messageId, sentAt, by, e.id, e.step, e.id, e.step],
+    [
+      id, e.id, step.id, e.step, subject, ownWords(text, 5000), subject, text.slice(0, 20_000), m.messageId, sentAt, by,
+      e.id, e.step, e.id, e.step, m.messageId, m.threadId, e.id,
+    ],
   );
   if (!inserted.length) throw new HandSentError("This step changed while you were looking: reload and try again", 409);
-  await run(
-    "UPDATE enrollments SET thread_id = COALESCE(thread_id, ?), mailbox = COALESCE(mailbox, ?), last_sent_at = ?, updated_at = datetime('now') WHERE id = ?",
-    [m.threadId, mail.address, sentAt, e.id],
-  );
-  await advance(e.id, e.step, new Date(at));
   await run(
     `UPDATE touches SET status = 'skipped', error = 'Sent by hand from Gmail', updated_at = datetime('now')
       WHERE enrollment_id = ? AND position = ? AND status IN (${OPEN_SQL})`,
     [e.id, e.step],
   );
+  await run(
+    "UPDATE enrollments SET thread_id = COALESCE(thread_id, ?), mailbox = COALESCE(mailbox, ?), last_sent_at = ?, updated_at = datetime('now') WHERE id = ?",
+    [m.threadId, mail.address, sentAt, e.id],
+  );
+  await advance(e.id, e.step, new Date(at));
 
-  const theirs = (await readThread(mail, m.threadId)).filter((x) => x.messageId && isInbound(x, mail.address) && timeOf(x) > at);
+  const theirs = (await readThread(mail, m.threadId)).filter((x) => x.messageId && isInbound(x, mail.address));
   const known = await knownInbound(theirs.map((x) => x.messageId!));
   for (const x of theirs) if (!known.has(x.messageId!)) await recordInbound(ctx, { ...e, thread_id: m.threadId }, x);
   return { touch_id: id, replies: ctx.done.replies };
@@ -971,7 +984,10 @@ async function sendNext(ctx: Ctx, cap: number): Promise<Date | null> {
   }
   const claimed = await query<{ id: string }>(
     `UPDATE touches SET status = 'sending', sending_at = ?, sent_subject = ?, sent_body = ?, updated_at = datetime('now')
-      WHERE id = ? AND status = 'approved' AND attachments = ? AND subject IS ? AND body IS ? AND approved_at IS ? RETURNING id`,
+      WHERE id = ? AND status = 'approved' AND attachments = ? AND subject IS ? AND body IS ? AND approved_at IS ?
+        AND EXISTS (SELECT 1 FROM enrollments e WHERE e.id = touches.enrollment_id AND e.step = touches.position AND e.status = 'active')
+        AND NOT EXISTS (SELECT 1 FROM touches o WHERE o.enrollment_id = touches.enrollment_id AND o.position = touches.position AND o.status IN ('sending', 'sent'))
+      RETURNING id`,
     [ctx.now.toISOString(), subject, body, ready.id, ready.attachments, ready.subject, ready.body, ready.approved_at],
   );
   if (!claimed.length) return ctx.now;

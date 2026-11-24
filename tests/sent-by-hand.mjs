@@ -36,8 +36,10 @@ function fixture({ step1 = 'email', status = 'active' } = {}) {
     INSERT INTO steps(id,campaign_id,position,wait_days,channel,writer) VALUES('s2','c',2,3,'email','thread');
     INSERT INTO enrollments(id,campaign_id,person_id,due_at) VALUES('e','c','p','2026-11-24T10:00:00.000Z');
     INSERT INTO touches(id,enrollment_id,step_id,position,channel,status) VALUES('t','e','s1',1,'${step1}','${step1 === 'email' ? 'research' : 'todo'}');`);
-  const mail = { sent: [ours], messages: { m1: ours, r1: reply }, threads: { th1: [ours] } };
+  const mail = { sent: [ours], messages: { m1: ours, r1: reply }, threads: { th1: [ours] }, sends: [] };
+  let onQuery = null;
   const env = { CLAWNIFY_ORG_ID: 'test', STORAGE: { async query(sql, params = []) {
+    if (onQuery) await onQuery(sql, params);
     const stmt = db.prepare(sql);
     if (/^\s*(SELECT|PRAGMA|WITH)/i.test(sql) || /\bRETURNING\b/i.test(sql)) return { rows: stmt.all(...params) };
     const result = stmt.run(...params); return { rows: [], meta: { changes: result.changes, last_row_id: Number(result.lastInsertRowid) } };
@@ -47,6 +49,8 @@ function fixture({ step1 = 'email', status = 'active' } = {}) {
     async executeTool(service, action, args) {
       if (action === 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID' && !mail.messages[args.message_id]) return { data: null, successful: false, error: 'Not found' };
       const data = action === 'GMAIL_GET_PROFILE' ? { emailAddress: 'sender@example.com' }
+        : action === 'GMAIL_SETTINGS_SEND_AS_GET' ? { displayName: 'Test Sender', isPrimary: true }
+        : action === 'GMAIL_SEND_EMAIL' ? (mail.sends.push(args), { id: 'dup', threadId: 'th9' })
         : action === 'GMAIL_FETCH_EMAILS' ? (mail.query = args.query, { messages: mail.sent })
         : action === 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID' ? mail.messages[args.message_id]
         : action === 'GMAIL_FETCH_MESSAGE_BY_THREAD_ID' ? { messages: mail.threads[args.thread_id] ?? [] } : {};
@@ -58,7 +62,7 @@ function fixture({ step1 = 'email', status = 'active' } = {}) {
     return { status: res.status, data: await res.json() };
   };
   const row = (sql) => db.prepare(sql).get();
-  return { db, env, mail, call, row };
+  return { db, env, mail, call, row, onQuery: (fn) => { onQuery = fn; } };
 }
 
 test('an email sent by hand counts as the step: thread, next step and open draft follow from it', async () => {
@@ -106,13 +110,47 @@ test('a reply already in the thread is recorded and stops the sequence', async (
   assert.equal(f.row("SELECT excerpt FROM inbound WHERE message_id='r1'").excerpt, 'Sounds interesting, call me.');
 });
 
+test('a message they wrote before ours in the thread is recorded too, as a send would on reading the thread', async () => {
+  const f = fixture();
+  const inquiry = { ...reply, messageId: 'q1', messageTimestamp: '2026-10-27T08:00:00.000Z', messageText: 'Can you quote for 40 people?' };
+  f.mail.threads.th1 = [inquiry, ours];
+  const counted = await f.call('POST', '/api/enrollments/e/sent-by-hand', { message_id: 'm1' });
+  assert.equal(counted.status, 200, JSON.stringify(counted.data));
+  assert.equal(counted.data.replies, 1);
+  assert.equal(counted.data.touch.enrollment.status, 'replied');
+});
+
+test('an approved draft never goes out for a step that already went out', async () => {
+  // The moment between counting an email and skipping the step's open draft.
+  const f = fixture();
+  f.db.exec(`UPDATE touches SET status='approved', subject='Hi', body='Body', approved_at='2026-11-24T09:00:00.000Z' WHERE id='t';
+    INSERT INTO touches(id,enrollment_id,step_id,position,channel,status,message_id,sent_at) VALUES('x','e','s1',1,'email','sent','m1','${ours.messageTimestamp}')`);
+  await f.call('GET', '/api/people/p'); // the run uses the database a request opened
+  await runOnce(f.env, now);
+  assert.equal(f.mail.sends.length, 0);
+  assert.equal(f.row("SELECT status FROM touches WHERE id='t'").status, 'approved');
+});
+
+test('a draft prepared while an email is being counted for the same step is not made', async () => {
+  const f = fixture();
+  f.db.exec("DELETE FROM touches");
+  await f.call('GET', '/api/people/p'); // the run uses the database a request opened
+  f.onQuery(async (sql) => {
+    if (!/^\s*INSERT INTO touches \(id, enrollment_id, step_id, position, channel, status\) SELECT/.test(sql)) return;
+    f.onQuery(null);
+    assert.equal((await f.call('POST', '/api/enrollments/e/sent-by-hand', { message_id: 'm1' })).status, 200);
+  });
+  await runOnce(f.env, now);
+  assert.deepEqual(f.db.prepare("SELECT position, status FROM touches WHERE enrollment_id='e' ORDER BY position").all().map((r) => [r.position, r.status]), [[1, 'sent']]);
+});
+
 test('an email that is not ours to the person, or out of order, is refused', async () => {
   const f = fixture();
   f.mail.messages.other = { ...ours, messageId: 'other', threadId: 'th2', to: 'someone@example.com' };
   f.mail.messages.theirs = { ...reply, messageId: 'theirs' };
   assert.match((await f.call('POST', '/api/enrollments/e/sent-by-hand', { message_id: 'other' })).data.error, /didn't go to recipient@example.com/);
   assert.match((await f.call('POST', '/api/enrollments/e/sent-by-hand', { message_id: 'theirs' })).data.error, /wasn't sent from sender@example.com/);
-  assert.equal((await f.call('POST', '/api/enrollments/e/sent-by-hand', { message_id: 'missing' })).status, 404);
+  assert.match((await f.call('POST', '/api/enrollments/e/sent-by-hand', { message_id: 'missing' })).data.error, /Couldn't read that email from sender@example.com/);
   f.db.exec("UPDATE enrollments SET last_sent_at='2026-11-01T00:00:00.000Z'");
   assert.match((await f.call('POST', '/api/enrollments/e/sent-by-hand', { message_id: 'm1' })).data.error, /older than the last one/);
   assert.deepEqual((await f.call('GET', '/api/enrollments/e/sent-by-hand')).data.emails, []);
