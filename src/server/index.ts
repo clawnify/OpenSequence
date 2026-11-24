@@ -15,7 +15,9 @@ import {
   skipOpenTouches, stepsOf, unsubscribe, upsertPerson, type Campaign, type Enrollment, type Person, type Settings, type SettingsPatch,
   type Step, type Touch,
 } from "./store.js";
-import { CrmCheckError, crmAppOf, crmKeptOut, ensureScheduled, runAndBook, scheduleRun, windowOf, type EngineEnv } from "./engine.js";
+import {
+  CrmCheckError, HandSentError, countSentByHand, crmAppOf, crmKeptOut, ensureScheduled, runAndBook, scheduleRun, sentByHand, windowOf, type EngineEnv,
+} from "./engine.js";
 import {
   AppAnswerError, connectionStatus, contactApps, crmContactsPage, crmLookup, dropListDemand, gmailSignature, leadApps, listsOf, mailFor, mailboxes, setListDemand, whatWeSell,
   workspaceAgents,
@@ -155,6 +157,7 @@ const TouchSchema = z.object({
   writer: z.enum(WRITERS),
   due_at: z.string().nullable(),
   sent_at: z.string().nullable(),
+  by_hand: z.boolean().openapi({ description: "Sent by a person from Gmail, outside Sequence, and counted as this step" }),
   starts_thread: z.boolean(),
   person: z.object({ id: z.string(), email: z.string(), first_name: z.string(), last_name: z.string(), title: z.string(), company: z.string(), linkedin_url: z.string(), phone: z.string(), notes: z.string() }),
   campaign: z.object({ id: z.string(), name: z.string() }),
@@ -268,7 +271,7 @@ function touchView(r: TouchRow) {
     edited: r.draft_body !== null && (r.body !== r.draft_body || (r.subject ?? null) !== (r.draft_subject ?? null)),
     rationale: r.rationale, sources: sourcesOf(r.sources), written_by: r.written_by, review_note: r.review_note, error: r.error,
     instructions: r.instructions ?? "", writer: (r.writer ?? "thread") as "research" | "thread",
-    due_at: r.due_at, sent_at: r.sent_at, starts_thread: startsThread,
+    due_at: r.due_at, sent_at: r.sent_at, by_hand: r.status === "sent" && !r.approved_at, starts_thread: startsThread,
     research: r.status === "research" ? { agent_id: r.research_agent_id, sent_at: r.research_sent_at, tries: r.research_tries } : null,
     person: { id: r.person_id, email: r.email, first_name: r.first_name, last_name: r.last_name, title: r.title, company: r.company, linkedin_url: r.linkedin_url, phone: r.phone, notes: r.person_notes, inbox: isInbox(r.email) },
     campaign: { id: r.campaign_id, name: r.campaign_name },
@@ -834,6 +837,65 @@ app.post("/api/enrollments/:id/:action{pause|resume|stop}", async (c) => {
   }
 });
 
+const HandSentSchema = z.object({
+  message_id: z.string(), thread_id: z.string(), subject: z.string(), sent_at: z.string().nullable(),
+  preview: z.string().openapi({ description: "The start of what was written" }),
+}).openapi("HandSent");
+
+const listSentByHand = createRoute({
+  method: "get",
+  path: "/api/enrollments/{id}/sent-by-hand",
+  tags: ["Campaigns"],
+  summary: "Emails sent to this person by hand from the campaign mailbox (Gmail) that could count as their current step, newest first",
+  request: { params: z.object({ id: z.string() }) },
+  responses: {
+    200: { description: "Candidates", content: { "application/json": { schema: z.object({ mailbox: z.string(), step: z.number().int(), emails: z.array(HandSentSchema) }) } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not possible: the step isn't an email, they aren't being written to, or the mailbox can't be read", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(listSentByHand, async (c) => {
+  const { id } = c.req.valid("param");
+  try {
+    return c.json(await sentByHand(c.env, id), 200);
+  } catch (err) {
+    if (err instanceof HandSentError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
+});
+
+const countSentByHandRoute = createRoute({
+  method: "post",
+  path: "/api/enrollments/{id}/sent-by-hand",
+  tags: ["Campaigns"],
+  summary: "Count an email already sent to this person from the campaign mailbox as their current step. It is read from Gmail: its thread becomes the sequence's, so follow-ups reply in it, and a reply already in it stops the sequence",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: { content: { "application/json": { schema: z.object({ message_id: z.string().openapi({ description: "From GET /api/enrollments/{id}/sent-by-hand" }) }) } } },
+  },
+  responses: {
+    200: { description: "Counted", content: { "application/json": { schema: z.object({ touch: TouchSchema, replies: z.number().int().openapi({ description: "Replies found in the thread and recorded" }) }) } } },
+    403: { description: "Not signed in", content: { "application/json": { schema: ErrorSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorSchema } } },
+    409: { description: "Not possible, with the reason", content: { "application/json": { schema: ErrorSchema } } },
+  },
+});
+
+app.openapi(countSentByHandRoute, async (c) => {
+  const { id } = c.req.valid("param");
+  const { message_id } = c.req.valid("json");
+  if (!mayWrite(c)) return c.json({ error: "Sign in to do this." }, 403);
+  try {
+    const r = await countSentByHand(c.env, id, message_id, who(c));
+    await kick(c);
+    return c.json({ touch: touchView((await touchById(r.touch_id))!), replies: r.replies }, 200);
+  } catch (err) {
+    if (err instanceof HandSentError) return c.json({ error: err.message }, err.status);
+    throw err;
+  }
+});
+
 // ── People ─────────────────────────────────────────────────────────
 
 const listPeople = createRoute({
@@ -940,8 +1002,10 @@ app.get("/api/people/:id", async (c) => {
   const id = c.req.param("id");
   const row = await get<PersonRow>(`${PERSON_SELECT} WHERE p.id = ?`, [id]);
   if (!row) return c.json({ error: "No such person" }, 404);
-  const enrollments = await query<Enrollment & { campaign_name: string }>(
-    "SELECT e.*, c.name AS campaign_name FROM enrollments e JOIN campaigns c ON c.id = e.campaign_id WHERE e.person_id = ? ORDER BY e.created_at DESC LIMIT 20",
+  const enrollments = await query<Enrollment & { campaign_name: string; step_channel: string | null }>(
+    `SELECT e.*, c.name AS campaign_name, s.channel AS step_channel FROM enrollments e JOIN campaigns c ON c.id = e.campaign_id
+      LEFT JOIN steps s ON s.campaign_id = e.campaign_id AND s.position = e.step
+      WHERE e.person_id = ? ORDER BY e.created_at DESC LIMIT 20`,
     [id],
   );
   const touches = await query<TouchRow>(`${TOUCH_SELECT} WHERE e.person_id = ? ORDER BY t.created_at DESC LIMIT 50`, [id]);
@@ -951,7 +1015,10 @@ app.get("/api/people/:id", async (c) => {
   );
   return c.json({
     person: personView(row),
-    enrollments: enrollments.map((e) => ({ id: e.id, campaign: { id: e.campaign_id, name: e.campaign_name }, status: e.status, step: e.step, due_at: e.due_at, reason: e.reason, last_sent_at: e.last_sent_at })),
+    enrollments: enrollments.map((e) => ({
+      id: e.id, campaign: { id: e.campaign_id, name: e.campaign_name }, status: e.status, step: e.step, step_channel: e.step_channel,
+      due_at: e.due_at, reason: e.reason, last_sent_at: e.last_sent_at,
+    })),
     touches: touches.map(touchView),
     replies: replies.map((r) => ({ id: r.message_id, kind: r.kind, intent: r.intent, summary: r.summary, excerpt: r.excerpt, received_at: r.received_at })),
   }, 200);

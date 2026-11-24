@@ -24,7 +24,7 @@ import {
 } from "./integrations.js";
 import {
   DAY_MS, MINUTE_MS, PREPARE_AHEAD_MS, addressOf, addressesIn, audienceMismatch, bookedWith, coerceDraft, coerceReading, companyDomain, crmKeepOut,
-  composeEmail, dailyCap, dayStart, draftPrompt, signatureFor, emailDomain, inboundKind, isInbound, localDay, needsOptOutCheck, nextSendAt, normaliseEmail,
+  composeEmail, dailyCap, dayStart, draftPrompt, signatureFor, emailDomain, header, inboundKind, isInbound, localDay, needsOptOutCheck, nextSendAt, normaliseEmail,
   isInbox, leadPerson, leadVerdict, ownWords, prepareBudget, readingPrompt, researchBatch, researchInstruction, SOURCE_CHECK_MS, type GmailMessage,
   type CrmKnown, type ListLead, type ResearchWaiting, type Window,
 } from "./sequence-rules.js";
@@ -751,6 +751,160 @@ async function settle(ctx: Ctx): Promise<void> {
       }
     }
   }
+}
+
+// ── Sent by hand ───────────────────────────────────────────────────
+//
+// Someone emailed a person from Gmail before (or instead of) Sequence sending
+// a step. That email is counted as the step, read from the mailbox Sequence
+// sends from, never typed in: its thread becomes the sequence's thread, so
+// follow-ups reply in it and a reply in it stops the sequence.
+
+/** Why an email sent by hand can't count as the step, and the status the API answers with. */
+export class HandSentError extends Error {
+  constructor(message: string, readonly status: 404 | 409) {
+    super(message);
+  }
+}
+
+/** An email from the mailbox to the person that could count as their current step. */
+export interface HandSent {
+  message_id: string;
+  thread_id: string;
+  subject: string;
+  sent_at: string | null;
+  preview: string;
+}
+
+const STEP_NAME: Record<string, string> = { call: "a call", linkedin: "a LinkedIn step", task: "a task" };
+
+async function handSentContext(env: EngineEnv, enrollmentId: string, now: Date) {
+  const e = await get<Enrollment>("SELECT * FROM enrollments WHERE id = ?", [enrollmentId]);
+  if (!e) throw new HandSentError("Not in this campaign", 404);
+  if (e.status !== "active" && e.status !== "paused") throw new HandSentError(`They aren't being written to in this campaign (${e.status})`, 409);
+  const step = await get<{ id: string; channel: string }>("SELECT id, channel FROM steps WHERE campaign_id = ? AND position = ?", [e.campaign_id, e.step]);
+  if (!step) throw new HandSentError(`The campaign has no step ${e.step}`, 409);
+  if (step.channel !== "email") throw new HandSentError(`Step ${e.step} is ${STEP_NAME[step.channel] ?? step.channel}, not an email: mark it done instead`, 409);
+  const person = await get<Person>("SELECT * FROM people WHERE id = ?", [e.person_id]);
+  if (!person) throw new HandSentError("No such person", 404);
+  const s = await getSettings();
+  if (!s.mailbox) throw new HandSentError("Pick the mailbox Sequence sends from in Settings first", 409);
+  if (e.mailbox && e.mailbox !== s.mailbox) throw new HandSentError(`This sequence's thread is in ${e.mailbox}: send from it again in Settings first`, 409);
+  let mail: Mail;
+  try {
+    mail = await mailFor(env, s.mailbox);
+  } catch (err) {
+    throw new HandSentError((err as Error).message, 409);
+  }
+  const ctx: Ctx = {
+    env, s, now, deadline: Date.now() + RUN_BUDGET_MS, mail, mailError: null,
+    done: { sent: 0, drafted: 0, replies: 0, meetings: 0 }, more: false,
+  };
+  return { ctx, e, step, person, mail };
+}
+
+async function countedMessages(ids: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (const chunk of parts([...new Set(ids)])) {
+    const rows = await query<{ message_id: string }>(`SELECT message_id FROM touches WHERE message_id IN (${inList(chunk.length)})`, chunk);
+    for (const r of rows) out.add(r.message_id);
+  }
+  return out;
+}
+
+const timeOf = (m: GmailMessage) => (m.messageTimestamp ? Date.parse(m.messageTimestamp) : Number.NaN);
+
+/**
+ * The emails the mailbox sent the person that could count as their current
+ * step, newest first: in the sequence's thread once it has one, else anywhere
+ * in Sent. Left out: one already counted, one in a thread another campaign
+ * writes in, and one older than the last email of this sequence.
+ */
+export async function sentByHand(env: EngineEnv, enrollmentId: string, now = new Date()): Promise<{ mailbox: string; step: number; emails: HandSent[] }> {
+  const { e, person, mail } = await handSentContext(env, enrollmentId, now);
+  const found = e.thread_id
+    ? (await readThread(mail, e.thread_id)).filter((m) => (m.labelIds ?? []).includes("SENT"))
+    : (await searchMail(mail, `in:sent to:${person.email}`, null, 10)).messages;
+  const counted = await countedMessages(found.map((m) => m.messageId ?? "").filter(Boolean));
+  const owners = await enrollmentsByThread(found.map((m) => m.threadId ?? "").filter(Boolean));
+  const after = e.last_sent_at ? Date.parse(e.last_sent_at) : 0;
+  const emails = found
+    .filter((m) => m.messageId && m.threadId && !counted.has(m.messageId))
+    .filter((m) => (owners.get(m.threadId!)?.id ?? e.id) === e.id)
+    .filter((m) => !(timeOf(m) <= after))
+    .sort((a, b) => (timeOf(b) || 0) - (timeOf(a) || 0))
+    .map((m) => ({
+      message_id: m.messageId!,
+      thread_id: m.threadId!,
+      subject: (m.subject ?? m.preview?.subject ?? header(m, "Subject") ?? "").trim(),
+      sent_at: Number.isNaN(timeOf(m)) ? null : new Date(timeOf(m)).toISOString(),
+      preview: ownWords(m.messageText ?? m.preview?.body, 200),
+    }));
+  return { mailbox: mail.address, step: e.step, emails };
+}
+
+/**
+ * Counts one email the mailbox sent the person as their current step: it is
+ * recorded as sent, its thread becomes the sequence's, and the next step falls
+ * due from its date. An open draft for the step is skipped. A reply already in
+ * the thread is recorded too, which stops the sequence as any reply does.
+ */
+export async function countSentByHand(
+  env: EngineEnv, enrollmentId: string, messageId: string, by: string | null, now = new Date(),
+): Promise<{ touch_id: string; replies: number }> {
+  const { ctx, e, step, person, mail } = await handSentContext(env, enrollmentId, now);
+  let m: GmailMessage;
+  try {
+    m = await readMessage(mail, messageId);
+  } catch {
+    throw new HandSentError(`No email ${messageId} in ${mail.address}`, 404);
+  }
+  if (!m.messageId || !m.threadId) throw new HandSentError(`No email ${messageId} in ${mail.address}`, 404);
+  if (!(m.labelIds ?? []).includes("SENT") || addressOf(m.sender ?? header(m, "From")) !== mail.address) {
+    throw new HandSentError(`That email wasn't sent from ${mail.address}`, 409);
+  }
+  const to = addressesIn(`${m.to ?? ""} ${header(m, "To") ?? ""} ${header(m, "Cc") ?? ""}`);
+  if (!to.includes(person.email)) throw new HandSentError(`That email didn't go to ${person.email}`, 409);
+  if (e.thread_id && m.threadId !== e.thread_id) throw new HandSentError("That email isn't in the thread this sequence writes in", 409);
+  const owner = (await enrollmentsByThread([m.threadId])).get(m.threadId);
+  if (owner && owner.id !== e.id) throw new HandSentError("That email's thread belongs to another campaign", 409);
+  if ((await countedMessages([m.messageId])).size) throw new HandSentError("That email already counts as a step", 409);
+  const at = timeOf(m);
+  if (Number.isNaN(at)) throw new HandSentError("Gmail didn't say when that email was sent", 409);
+  if (e.last_sent_at && at <= Date.parse(e.last_sent_at)) throw new HandSentError("That email is older than the last one in this sequence", 409);
+  if (await get("SELECT id FROM touches WHERE enrollment_id = ? AND position = ? AND status = 'sending'", [e.id, e.step])) {
+    throw new HandSentError("Sequence is sending this step right now: check it again in a minute", 409);
+  }
+
+  const sentAt = new Date(at).toISOString();
+  const subject = e.thread_id ? null : (m.subject ?? header(m, "Subject") ?? "").trim() || null;
+  const text = m.messageText ?? m.preview?.body ?? "";
+  const id = crypto.randomUUID();
+  // Only while the person is still on this step and nothing else went out for it.
+  const inserted = await query<{ id: string }>(
+    `INSERT INTO touches (id, enrollment_id, step_id, position, channel, status, subject, body, sent_subject, sent_body, written_by, message_id, sent_at, done_by)
+     SELECT ?, ?, ?, ?, 'email', 'sent', ?, ?, ?, ?, 'person', ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM enrollments WHERE id = ? AND step = ? AND status IN ('active', 'paused'))
+        AND NOT EXISTS (SELECT 1 FROM touches WHERE enrollment_id = ? AND position = ? AND status IN ('sending', 'sent'))
+     RETURNING id`,
+    [id, e.id, step.id, e.step, subject, ownWords(text, 5000), subject, text.slice(0, 20_000), m.messageId, sentAt, by, e.id, e.step, e.id, e.step],
+  );
+  if (!inserted.length) throw new HandSentError("This step changed while you were looking: reload and try again", 409);
+  await run(
+    "UPDATE enrollments SET thread_id = COALESCE(thread_id, ?), mailbox = COALESCE(mailbox, ?), last_sent_at = ?, updated_at = datetime('now') WHERE id = ?",
+    [m.threadId, mail.address, sentAt, e.id],
+  );
+  await advance(e.id, e.step, new Date(at));
+  await run(
+    `UPDATE touches SET status = 'skipped', error = 'Sent by hand from Gmail', updated_at = datetime('now')
+      WHERE enrollment_id = ? AND position = ? AND status IN (${OPEN_SQL})`,
+    [e.id, e.step],
+  );
+
+  const theirs = (await readThread(mail, m.threadId)).filter((x) => x.messageId && isInbound(x, mail.address) && timeOf(x) > at);
+  const known = await knownInbound(theirs.map((x) => x.messageId!));
+  for (const x of theirs) if (!known.has(x.messageId!)) await recordInbound(ctx, { ...e, thread_id: m.threadId }, x);
+  return { touch_id: id, replies: ctx.done.replies };
 }
 
 async function sendNext(ctx: Ctx, cap: number): Promise<Date | null> {
