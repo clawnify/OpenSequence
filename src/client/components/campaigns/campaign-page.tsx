@@ -5,7 +5,7 @@ import { api } from "@/api";
 import { useApp } from "@/context";
 import { useLoad } from "@/hooks/use-load";
 import type { Navigate } from "@/hooks/use-router";
-import { CAMPAIGN_STATUS, CHANNEL_LABEL, ENROLLMENT_STATUS, ago, due, personName, plural } from "@/lib/format";
+import { CAMPAIGN_STATUS, CHANNEL_ICON, CHANNEL_LABEL, ENROLLMENT_STATUS, ago, due, personName, plural } from "@/lib/format";
 import { EmptyState, PageHeader, Pager, Pill, SectionTitle } from "@/components/shared";
 import { Notice, Switch } from "@/components/settings-ui";
 import { Button } from "@/components/ui/button";
@@ -359,7 +359,7 @@ function StepsEditor({ campaignId, steps: saved, onSaved }: { campaignId: string
                 <span className="w-16 shrink-0 text-sm font-medium">Step {i + 1}</span>
                 <span className="w-16 shrink-0 tabular text-[0.8125rem] text-muted-foreground">day {day}</span>
                 <Picker label={`Step ${i + 1} channel`} className="w-32" value={s.channel}
-                  options={CHANNELS.map((ch) => ({ value: ch, label: CHANNEL_LABEL[ch] }))}
+                  options={CHANNELS.map((ch) => ({ value: ch, label: CHANNEL_LABEL[ch], icon: CHANNEL_ICON[ch] }))}
                   onChange={(v) => set(i, { channel: v as Channel })} />
                 {s.channel === "email" && (
                   <Picker label={`Step ${i + 1} writer`} className="w-60" value={s.writer} options={WRITER_OPTIONS} onChange={(v) => set(i, { writer: v as Writer })} />

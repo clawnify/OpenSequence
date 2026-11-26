@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, ChevronsUpDown } from "lucide-react";
+import { Check, ChevronsUpDown, type LucideIcon } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Popover, PopoverContent, PopoverTrigger } from "./popover";
 import { Command, CommandEmpty, CommandInput, CommandItem, CommandList } from "./command";
@@ -8,6 +8,8 @@ export interface PickerOption {
   value: string;
   label: string;
   hint?: string;
+  /** Shown before the label, in the list and on the field. */
+  icon?: LucideIcon;
 }
 
 /**
@@ -45,7 +47,10 @@ export function Picker({
             className,
           )}
         >
-          <span className={cn("truncate", !current && "text-faint")}>{current?.label ?? placeholder}</span>
+          <span className={cn("flex min-w-0 items-center gap-2", !current && "text-faint")}>
+            {current?.icon && <current.icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
+            <span className="truncate">{current?.label ?? placeholder}</span>
+          </span>
           <ChevronsUpDown className="size-3.5 shrink-0 text-faint" />
         </button>
       </PopoverTrigger>
@@ -64,6 +69,7 @@ export function Picker({
                 }}
               >
                 <Check className={cn("size-3.5 shrink-0", o.value === value ? "opacity-100" : "opacity-0")} />
+                {o.icon && <o.icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />}
                 <span className="min-w-0 flex-1">
                   <span className="block truncate">{o.label}</span>
                   {o.hint && <span className="block truncate text-[0.75rem] text-muted-foreground">{o.hint}</span>}

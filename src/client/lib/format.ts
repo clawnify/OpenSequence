@@ -1,3 +1,4 @@
+import { Linkedin, ListTodo, Mail, Phone, type LucideIcon } from "lucide-react";
 import type { CampaignStatus, Channel, EnrollmentStatus, Intent, PersonRef } from "../types";
 import type { ColorToken } from "./utils";
 
@@ -62,6 +63,13 @@ export const INTENT: Record<Intent, { label: string; tone: ColorToken }> = {
   unsubscribe: { label: "Opted out", tone: "danger" },
   out_of_office: { label: "Out of office", tone: "warning" },
   other: { label: "Other", tone: "info" },
+};
+
+export const CHANNEL_ICON: Record<Channel, LucideIcon> = {
+  email: Mail,
+  call: Phone,
+  linkedin: Linkedin,
+  task: ListTodo,
 };
 
 export const CHANNEL_LABEL: Record<Channel, string> = {
