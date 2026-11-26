@@ -24,7 +24,8 @@ import {
 } from "./integrations.js";
 import {
   DAY_MS, MINUTE_MS, PREPARE_AHEAD_MS, addressOf, addressesIn, audienceMismatch, bookedWith, coerceDraft, coerceReading, companyDomain, crmKeepOut,
-  composeEmail, dailyCap, dayStart, draftPrompt, signatureFor, emailDomain, header, inboundKind, isInbound, localDay, needsOptOutCheck, nextSendAt, normaliseEmail,
+  composeEmail, dailyCap, dayStart, draftPrompt, signatureFor, emailDomain, header, inboundKind, isInbound, localDay, needsOptOutCheck, nextSendAt, nextWindowOpen, normaliseEmail,
+  rangesOrSingle, resolveWindow,
   isInbox, leadPerson, leadVerdict, ownWords, prepareBudget, readingPrompt, researchBatch, researchInstruction, SOURCE_CHECK_MS, type GmailMessage,
   type CrmKnown, type ListLead, type ResearchWaiting, type Window,
 } from "./sequence-rules.js";
@@ -65,7 +66,25 @@ const inList = (n: number) => Array.from({ length: n }, () => "?").join(", ");
 const OPEN_SQL = OPEN_TOUCH.map((s) => `'${s}'`).join(", ");
 
 export function windowOf(s: Settings): Window {
-  return { timezone: s.timezone, send_from: s.send_from, send_until: s.send_until, weekdays_only: !!s.weekdays_only };
+  return { timezone: s.timezone, ranges: rangesOrSingle(s.send_ranges, s.send_from, s.send_until), weekdays_only: !!s.weekdays_only };
+}
+
+/** The window a campaign's emails go out in: its own hours over the workspace's. */
+export function campaignWindow(s: Settings, sendWindow: string | null): Window {
+  return resolveWindow(windowOf(s), sendWindow);
+}
+
+/** When an approved email of a campaign may go out at the earliest: due, inside the
+ *  campaign's hours, under the workspace's cap and a gap after the last send. */
+export async function earliestSend(s: Settings, sendWindow: string | null, dueAt: string | null, now: Date): Promise<Date> {
+  const cap = dailyCap(s.daily_cap, s.ramp_from, localDay(now, s.timezone));
+  const sentToday = (await get<{ n: number }>("SELECT COUNT(*) AS n FROM touches WHERE status = 'sent' AND sent_at >= ?", [dayStart(now, s.timezone).toISOString()]))?.n ?? 0;
+  const due = dueAt ? Date.parse(dueAt) : NaN;
+  const from = Number.isNaN(due) || due < now.getTime() ? now : new Date(due);
+  const w = campaignWindow(s, sendWindow);
+  const at = nextSendAt(now, w, cap, { sentToday, lastSentAt: s.last_sent_at }, s.timezone);
+  // Due on a later day: today's cap and spacing no longer apply, only the hours.
+  return at.getTime() >= from.getTime() ? at : nextWindowOpen(from, w);
 }
 
 /** The CRM sends and replies are written to: the one picked in Settings, else the
@@ -921,21 +940,34 @@ export async function countSentByHand(
 }
 
 async function sendNext(ctx: Ctx, cap: number): Promise<Date | null> {
-  const w = windowOf(ctx.s);
-  const sentToday = (await get<{ n: number }>("SELECT COUNT(*) AS n FROM touches WHERE status = 'sent' AND sent_at >= ?", [dayStart(ctx.now, w.timezone).toISOString()]))?.n ?? 0;
-  const ready = await get<Touch & { campaign_id: string; person_id: string; thread_id: string | null; email: string }>(
-    `SELECT t.*, e.campaign_id, e.person_id, e.thread_id, p.email
-       FROM touches t
+  const sentToday = (await get<{ n: number }>("SELECT COUNT(*) AS n FROM touches WHERE status = 'sent' AND sent_at >= ?", [dayStart(ctx.now, ctx.s.timezone).toISOString()]))?.n ?? 0;
+  const READY = `FROM touches t
        JOIN enrollments e ON e.id = t.enrollment_id AND e.status = 'active' AND e.step = t.position
        JOIN campaigns c ON c.id = e.campaign_id AND c.status = 'active'
        JOIN people p ON p.id = e.person_id AND p.unsubscribed_at IS NULL AND p.bounced_at IS NULL
-      WHERE t.status = 'approved' AND t.channel = 'email' AND e.due_at <= ?
+      WHERE t.status = 'approved' AND t.channel = 'email' AND e.due_at <= ?`;
+  // Each campaign sends in its own hours, so the oldest email may wait while
+  // another campaign's window is open: pick among the campaigns open now.
+  const waiting = await query<{ id: string; send_window: string | null }>(
+    `SELECT DISTINCT c.id, c.send_window ${READY}`, [ctx.now.toISOString()],
+  );
+  if (!waiting.length) return null;
+  const open: string[] = [];
+  let soonest: Date | null = null;
+  for (const c of waiting) {
+    const when = nextSendAt(ctx.now, campaignWindow(ctx.s, c.send_window), cap, { sentToday, lastSentAt: ctx.s.last_sent_at }, ctx.s.timezone);
+    if (when.getTime() <= ctx.now.getTime()) open.push(c.id);
+    else if (!soonest || when < soonest) soonest = when;
+  }
+  if (!open.length) return soonest;
+  // shortcut: the first 50 open campaigns; the rest get their turn as these empty. Raise it if a workspace runs more at once.
+  const ids = open.slice(0, 50);
+  const ready = await get<Touch & { campaign_id: string; person_id: string; thread_id: string | null; email: string }>(
+    `SELECT t.*, e.campaign_id, e.person_id, e.thread_id, p.email ${READY} AND c.id IN (${inList(ids.length)})
       ORDER BY e.due_at, t.approved_at LIMIT 1`,
-    [ctx.now.toISOString()],
+    [ctx.now.toISOString(), ...ids],
   );
   if (!ready) return null;
-  const when = nextSendAt(ctx.now, w, cap, { sentToday, lastSentAt: ctx.s.last_sent_at });
-  if (when.getTime() > ctx.now.getTime()) return when;
   const mail = await openMail(ctx);
   if (!mail) return null;
   const e = (await get<Enrollment>("SELECT * FROM enrollments WHERE id = ?", [ready.enrollment_id]))!;

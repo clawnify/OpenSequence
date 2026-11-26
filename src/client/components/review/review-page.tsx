@@ -16,7 +16,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import type { CrmCheck, Page, Touch, TouchDetail } from "@/types";
+import { describeHours } from "@/components/sending-hours";
+import type { CrmCheck, Page, SendRange, Touch, TouchDetail } from "@/types";
 
 const TAB_LABEL: Record<ReviewTab, string> = {
   review: "To approve",
@@ -323,7 +324,9 @@ function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (i
       {approved ? (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[0.8125rem] text-muted-foreground">
-            Approved{t.due_at ? `: goes out ${due(laterOf(t.due_at, overview?.sending.next_send_at))}` : ""}, inside the sending hours.
+            {detail.sending
+              ? `Approved: goes out ${earliest(detail.sending.earliest_at)}, in ${hoursOf(detail.sending.window)}.`
+              : `Approved${t.due_at ? `: goes out ${due(laterOf(t.due_at, overview?.sending.next_send_at))}` : ""}, inside the sending hours.`}
           </span>
           <Button size="sm" variant="outline" className="ml-auto" disabled={busy}
             onClick={() => void act(() => api("PATCH", `/api/touches/${t.id}`, {}))}>
@@ -340,6 +343,11 @@ function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (i
           <Button size="lg" variant="outline" disabled={busy} onClick={() => setNote("")}>Send back</Button>
           <Button size="lg" variant="ghost" disabled={busy} onClick={() => void act(() => api("POST", `/api/touches/${t.id}/skip`, {}))}>Skip this step</Button>
           {!canApprove && <span className="text-[0.8125rem] text-muted-foreground">Only a signed-in person can approve.</span>}
+          {canApprove && detail.sending && (
+            <span className="text-[0.8125rem] text-muted-foreground">
+              Once approved, it goes out {earliest(detail.sending.earliest_at)}, in {hoursOf(detail.sending.window)}.
+            </span>
+          )}
         </div>
       ) : (
         <div className="flex flex-col gap-2 rounded-md bg-card p-3 shadow-edge">
@@ -356,6 +364,16 @@ function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (i
       )}
     </section>
   );
+}
+
+/** "right away", or "tomorrow 09:00 at the earliest": others approved before it may go first. */
+function earliest(iso: string): string {
+  const d = due(iso);
+  return d === "now" ? "right away" : `${d} at the earliest`;
+}
+
+function hoursOf(w: { timezone: string; ranges: SendRange[]; weekdays_only: boolean; own: boolean }): string {
+  return `${w.own ? "this campaign's" : "the"} sending hours (${describeHours(w)})`;
 }
 
 function laterOf(a: string, b: string | undefined): string {

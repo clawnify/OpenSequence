@@ -21,6 +21,7 @@ export interface Settings {
   ramp_from: string | null;
   send_from: string;
   send_until: string;
+  send_ranges: string | null;
   timezone: string;
   weekdays_only: number;
   crm_app_id: string | null;
@@ -52,6 +53,7 @@ export interface Campaign {
   /** null: the workspace default; "none": no signature; else a signature's id. */
   signature_id: string | null;
   reply_signature_id: string | null;
+  send_window: string | null;
   source_app_id: string | null;
   source_list_id: string | null;
   source_list_name: string | null;
@@ -183,7 +185,7 @@ export async function getSettings(): Promise<Settings> {
 
 const EDITABLE = [
   "about", "mailbox", "signature_id", "reply_signature_id", "opt_out", "daily_cap", "ramp_from", "send_from", "send_until",
-  "timezone", "weekdays_only", "crm_app_id", "research_agent_id", "research_agent_name",
+  "send_ranges", "timezone", "weekdays_only", "crm_app_id", "research_agent_id", "research_agent_name",
 ] as const;
 export type SettingsPatch = Partial<Pick<Settings, (typeof EDITABLE)[number]>>;
 

@@ -92,6 +92,13 @@ address. People carry `inbox: true` when their address is one.
   with `GET /api/signatures` and pick with `PATCH /api/campaigns/{id}`
   `{ "signature_id", "reply_signature_id" }` (an id, `"none"`, or `null` for the
   default). Writing or changing a signature is the person's, in Settings.
+- Sending hours: a campaign uses the workspace's (Settings: one or more ranges a
+  day, a time zone, weekdays only). For people in another time zone, or other
+  hours, when the person asks: `PATCH /api/campaigns/{id}` `{ "send_window":
+  { "timezone": "America/New_York", "ranges": [{ "from": "09:00", "until":
+  "12:00" }, { "from": "14:00", "until": "17:00" }], "weekdays_only": true } }`.
+  Any part left out stays the workspace's; `null` goes back to them. An approved
+  email waits for its campaign's hours: `GET /api/touches/{id}` → `sending`.
 
 ## Replies
 
