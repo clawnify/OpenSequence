@@ -16,6 +16,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AddPeopleDialog } from "./add-people-dialog";
+import { RangesField, describeHours, zones } from "@/components/sending-hours";
 import type { Campaign, CampaignPerson, Channel, EnrollmentStatus, Page, PeopleList, Signature, SourceActivity, Step, Writer } from "@/types";
 
 const CHANNELS: Channel[] = ["email", "call", "linkedin", "task"];
@@ -169,6 +170,7 @@ function About({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record
         </span>
       </div>
       <CampaignSignatures campaign={c} onSave={onSave} />
+      <CampaignHours campaign={c} onSave={onSave} />
     </section>
   );
 }
@@ -251,6 +253,42 @@ function NumberField({ label, value, min, max, onSave }: { label: string; value:
 }
 
 /** Which signature this campaign's first emails and follow-ups get: the workspace default unless it picks one. */
+/** The workspace's sending hours, or the campaign's own: for a list in another time zone, or other hours. */
+function CampaignHours({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record<string, unknown>) => Promise<void> }) {
+  const { overview } = useApp();
+  const base = overview?.sending.hours;
+  const own = c.send_window;
+  const zoneOptions = useMemo(() => zones(own?.timezone ?? base?.timezone ?? ""), [own?.timezone, base?.timezone]);
+  if (!base) return null;
+  const w = { timezone: own?.timezone ?? base.timezone, ranges: own?.ranges ?? base.ranges, weekdays_only: own?.weekdays_only ?? base.weekdays_only };
+  const save = (part: Partial<typeof w>) => void onSave({ send_window: { ...w, ...part } });
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-start gap-3">
+        <Switch checked={!!own} onChange={(on) => void onSave({ send_window: on ? w : null })} label="Its own sending hours" />
+        <span className="text-sm">
+          Its own sending hours
+          <span className="block text-[0.8125rem] text-muted-foreground">
+            {own
+              ? "For people in another time zone, or other hours. Approved emails wait for them."
+              : `The workspace's: ${describeHours(base)}.`}
+          </span>
+        </span>
+      </div>
+      {own && (
+        <div className="flex flex-wrap items-start gap-x-6 gap-y-2 pl-12">
+          <RangesField ranges={w.ranges} onSave={(ranges) => save({ ranges })} />
+          <Picker label="Time zone" className="w-64" value={w.timezone} options={zoneOptions} searchPlaceholder="Search time zones" onChange={(timezone) => save({ timezone })} />
+          <label className="flex items-center gap-2 text-sm">
+            <Switch checked={w.weekdays_only} onChange={(weekdays_only) => save({ weekdays_only })} label="Weekdays only" />
+            Weekdays only
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function CampaignSignatures({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record<string, unknown>) => Promise<void> }) {
   const data = useLoad<{ signatures: Signature[]; defaults: { signature_id: string | null; reply_signature_id: string | null } }>("/api/signatures?limit=100");
   if (!data.data) return null;

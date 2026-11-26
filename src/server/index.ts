@@ -6,7 +6,8 @@ import type { Context } from "hono";
 import type { CredentialBinding } from "@clawnify/connections";
 import { query, get, run } from "./db.js";
 import {
-  CHANNELS, WRITERS, dayStart, dailyCap, isDay, isHtml, isTimezone, localDay, minutesOf, nextSendAt, normaliseEmail, validateSteps,
+  CHANNELS, WRITERS, dayStart, dailyCap, isDay, isHtml, isTimezone, localDay, minutesOf, nextSendAt, normaliseEmail, validateOverride, validateRanges, validateSteps,
+  type Window, type WindowOverride,
 } from "./sequence-rules.js";
 import { MAX_SIGNATURE, sanitizeSignature } from "./signature.js";
 import { NO_SIGNATURE, crmNotes, isInbox, signatureFor } from "./sequence-rules.js";
@@ -15,7 +16,7 @@ import {
   skipOpenTouches, stepsOf, unsubscribe, upsertPerson, type Campaign, type Enrollment, type Person, type Settings, type SettingsPatch,
   type Step, type Touch,
 } from "./store.js";
-import { CrmCheckError, crmAppOf, crmKeptOut, ensureScheduled, runAndBook, scheduleRun, windowOf, type EngineEnv } from "./engine.js";
+import { CrmCheckError, campaignWindow, crmAppOf, crmKeptOut, earliestSend, ensureScheduled, runAndBook, scheduleRun, windowOf, type EngineEnv } from "./engine.js";
 import {
   AppAnswerError, connectionStatus, contactApps, crmContactsPage, crmLookup, dropListDemand, gmailSignature, leadApps, listsOf, mailFor, mailboxes, setListDemand, whatWeSell,
   workspaceAgents,
@@ -82,6 +83,24 @@ const StepSchema = z.object({
   instructions: z.string(),
 }).openapi("Step");
 
+const RangeSchema = z.object({ from: z.string().openapi({ example: "09:00" }), until: z.string().openapi({ example: "12:00" }) });
+const SendWindowSchema = z.object({
+  timezone: z.string().optional().openapi({ description: "Time zone name, e.g. America/New_York: the hours are read there" }),
+  ranges: z.array(RangeSchema).optional().openapi({ description: "Stretches of the day emails go out in, local time; several for a break, e.g. 09:00-12:00 and 14:00-17:00" }),
+  weekdays_only: z.boolean().optional(),
+}).openapi("SendWindow");
+
+/** A campaign's saved hours as the API shows them; null when it uses the workspace's. */
+function overrideOf(saved: string | null): WindowOverride | null {
+  if (!saved) return null;
+  try {
+    const v = validateOverride(JSON.parse(saved));
+    return "override" in v ? v.override : null;
+  } catch {
+    return null;
+  }
+}
+
 const CampaignSchema = z.object({
   id: z.string(),
   name: z.string(),
@@ -92,6 +111,7 @@ const CampaignSchema = z.object({
   skip_known: z.boolean().openapi({ description: "People the connected CRM knows (their company a customer, a deal open, a call booked) stay out as they join, with the reason. Off for a campaign meant for them" }),
   signature_id: z.string().nullable().openapi({ description: "First emails: null = the workspace default, 'none' = no signature, else a signature id" }),
   reply_signature_id: z.string().nullable().openapi({ description: "Follow-ups: the same" }),
+  send_window: SendWindowSchema.nullable().openapi({ description: "Its own sending hours, laid over the workspace's: any part left out is the workspace's. null: the workspace's hours" }),
   source: z.object({
     app_id: z.string(), list_id: z.string(), list_name: z.string(),
     daily: z.number().int().openapi({ description: "New people a day from the list, at most" }),
@@ -194,6 +214,7 @@ function campaignView(r: CampaignRow) {
   return {
     id: r.id, name: r.name, angle: r.angle, status: r.status, stop_company: !!r.stop_company, audience: r.audience, skip_known: !!r.skip_known,
     signature_id: r.signature_id, reply_signature_id: r.reply_signature_id,
+    send_window: overrideOf(r.send_window),
     source: r.source_list_id && r.source_app_id
       ? {
         app_id: r.source_app_id, list_id: r.source_list_id, list_name: r.source_list_name ?? "", daily: r.source_daily,
@@ -305,6 +326,7 @@ async function sendingView(s: Settings, now = new Date()) {
   const sentToday = (await get<{ n: number }>("SELECT COUNT(*) AS n FROM touches WHERE status = 'sent' AND sent_at >= ?", [dayStart(now, w.timezone).toISOString()]))?.n ?? 0;
   return {
     mailbox: s.mailbox,
+    hours: w,
     cap_today: cap,
     sent_today: sentToday,
     next_send_at: nextSendAt(now, w, cap, { sentToday, lastSentAt: s.last_sent_at }).toISOString(),
@@ -580,6 +602,13 @@ app.patch("/api/campaigns/:id", async (c) => {
       }
       sets.push(`${key} = ?`);
       params.push(v);
+    }
+    // Its own sending hours over the workspace's, or null for the workspace's. Approved emails follow the new hours.
+    if (b.send_window !== undefined) {
+      const v = validateOverride(b.send_window);
+      if ("error" in v) return c.json({ error: v.error }, 400);
+      sets.push("send_window = ?");
+      params.push(v.override ? JSON.stringify(v.override) : null);
     }
     // The list it takes new people from: { app_id, list_id, daily?, per_company? }, or null to stop.
     if (b.source !== undefined) {
@@ -1088,6 +1117,10 @@ const getTouch = createRoute({
             replies: z.array(z.object({ kind: z.string(), intent: z.string().nullable(), summary: z.string().nullable(), excerpt: z.string(), received_at: z.string() })),
             signature: z.string().openapi({ description: "The signature this email gets when it goes out: plain text or HTML" }),
             what_we_sell: z.string().openapi({ description: "What we sell, as the writer should use it: Settings, or the org's Company Knowledge document when Settings leaves it empty" }),
+            sending: z.object({
+              earliest_at: z.string().openapi({ description: "The earliest it can go out once approved: due, inside the hours, under the daily cap. Others approved before it may go first" }),
+              window: z.object({ timezone: z.string(), ranges: z.array(RangeSchema), weekdays_only: z.boolean(), own: z.boolean().openapi({ description: "The campaign's own hours, not the workspace's" }) }),
+            }).nullable().openapi({ description: "For an email waiting for approval or approved: when it can go out" }),
           }),
         },
       },
@@ -1109,10 +1142,17 @@ app.openapi(getTouch, async (c) => {
     [t.enrollment_id],
   );
   const view = touchView(t);
-  const campaign = await get<{ signature_id: string | null; reply_signature_id: string | null }>("SELECT signature_id, reply_signature_id FROM campaigns WHERE id = ?", [t.campaign_id]);
-  const signature = signatureFor(view.starts_thread ? "first" : "reply", campaign ?? { signature_id: null, reply_signature_id: null }, await getSettings(), await signatureBodies());
-  const sold = await whatWeSell(c.env, (await getSettings()).about).catch(() => ({ text: "" }));
-  return c.json({ touch: view, thread, replies, signature, what_we_sell: sold.text }, 200);
+  const campaign = await get<{ signature_id: string | null; reply_signature_id: string | null; send_window: string | null }>("SELECT signature_id, reply_signature_id, send_window FROM campaigns WHERE id = ?", [t.campaign_id]);
+  const s = await getSettings();
+  const signature = signatureFor(view.starts_thread ? "first" : "reply", campaign ?? { signature_id: null, reply_signature_id: null }, s, await signatureBodies());
+  const sold = await whatWeSell(c.env, s.about).catch(() => ({ text: "" }));
+  let sending = null;
+  if (t.channel === "email" && (t.status === "review" || t.status === "approved")) {
+    const own = campaign?.send_window ?? null;
+    const w: Window = campaignWindow(s, own);
+    sending = { earliest_at: (await earliestSend(s, own, t.due_at, new Date())).toISOString(), window: { ...w, own: !!overrideOf(own) } };
+  }
+  return c.json({ touch: view, thread, replies, signature, what_we_sell: sold.text, sending }, 200);
 });
 
 const CrmKnownSchema = z.object({
@@ -1556,7 +1596,7 @@ async function settingsView(c: C) {
     settings: {
       about: s.about, mailbox: s.mailbox, signature_id: s.signature_id, reply_signature_id: s.reply_signature_id,
       opt_out: s.opt_out, daily_cap: s.daily_cap, ramp_from: s.ramp_from,
-      send_from: s.send_from, send_until: s.send_until, timezone: s.timezone, weekdays_only: !!s.weekdays_only,
+      send_from: s.send_from, send_until: s.send_until, send_ranges: windowOf(s).ranges, timezone: s.timezone, weekdays_only: !!s.weekdays_only,
       crm_app_id: s.crm_app_id, crm_in_use: crmAppOf(c.env, s),
       research_agent_id: s.research_agent_id, research_agent_name: s.research_agent_name, research_error: s.research_error,
     },
@@ -1623,10 +1663,21 @@ app.put("/api/settings", async (c) => {
       if (b.ramp_from !== null && !isDay(b.ramp_from)) return c.json({ error: "ramp_from is a day (YYYY-MM-DD) or null" }, 400);
       patch.ramp_from = b.ramp_from as string | null;
     }
-    for (const key of ["send_from", "send_until"] as const) {
-      if (b[key] === undefined) continue;
-      if (minutesOf(b[key]) === null) return c.json({ error: `${key} is a time like 09:00` }, 400);
-      patch[key] = b[key] as string;
+    // Sending hours: one range (send_from, send_until), or several (send_ranges). The
+    // first and last ends of the ranges are kept in send_from and send_until too.
+    if (b.send_ranges !== undefined) {
+      const v = validateRanges(b.send_ranges);
+      if ("error" in v) return c.json({ error: v.error }, 400);
+      patch.send_ranges = v.ranges.length > 1 ? JSON.stringify(v.ranges) : null;
+      patch.send_from = v.ranges[0].from;
+      patch.send_until = v.ranges[v.ranges.length - 1].until;
+    } else {
+      for (const key of ["send_from", "send_until"] as const) {
+        if (b[key] === undefined) continue;
+        if (minutesOf(b[key]) === null) return c.json({ error: `${key} is a time like 09:00` }, 400);
+        patch[key] = b[key] as string;
+        patch.send_ranges = null;
+      }
     }
     if (b.timezone !== undefined) {
       if (!isTimezone(b.timezone)) return c.json({ error: "timezone is a time zone name like Europe/Amsterdam" }, 400);

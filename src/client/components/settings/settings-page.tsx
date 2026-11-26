@@ -12,20 +12,9 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Picker } from "@/components/ui/picker";
 import { SignatureEditor } from "@/components/signature-editor";
+import { RangesField, zones } from "@/components/sending-hours";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import type { SettingsView, Signature } from "@/types";
-
-function zones(current: string): Array<{ value: string; label: string }> {
-  let all: string[] = [];
-  try {
-    all = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.("timeZone") ?? [];
-  } catch {
-    all = [];
-  }
-  if (!all.includes("UTC")) all = ["UTC", ...all];
-  if (current && !all.includes(current)) all = [current, ...all];
-  return all.map((z) => ({ value: z, label: z.replace(/_/g, " ") }));
-}
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -130,10 +119,8 @@ export function SettingsPage() {
               <Row title="Emails a day" hint="All campaigns together. They are spread across the sending hours." htmlFor="cap">
                 <NumberField id="cap" value={s.daily_cap} min={1} max={200} disabled={!can} onSave={(n) => void save({ daily_cap: n })} />
               </Row>
-              <Row title="Sending hours" hint="Local time. Nothing goes out outside them.">
-                <TimeField label="From" value={s.send_from} disabled={!can} onSave={(t) => void save({ send_from: t })} />
-                <span className="text-muted-foreground">to</span>
-                <TimeField label="Until" value={s.send_until} disabled={!can} onSave={(t) => void save({ send_until: t })} />
+              <Row title="Sending hours" hint="Local time. Nothing goes out outside them, even once approved: approve in the evening and it goes out when they open. Add a second range for a break. A campaign can have its own.">
+                <RangesField ranges={s.send_ranges} disabled={!can} onSave={(r) => void save({ send_ranges: r })} />
               </Row>
               <Row title="Time zone">
                 <Picker label="Time zone" className="w-64" disabled={!can} value={s.timezone} options={zoneOptions} searchPlaceholder="Search time zones" onChange={(tz) => void save({ timezone: tz })} />
@@ -365,13 +352,4 @@ function NumberField({ id, value, min, max, disabled, onSave }: { id: string; va
     if (n !== value) onSave(n);
   };
   return <Input id={id} type="number" min={min} max={max} className="w-20" value={text} disabled={disabled} onChange={(e) => setText(e.target.value)} onBlur={commit} />;
-}
-
-function TimeField({ label, value, disabled, onSave }: { label: string; value: string; disabled?: boolean; onSave: (t: string) => void }) {
-  const [text, setText] = useState(value);
-  useEffect(() => setText(value), [value]);
-  return (
-    <Input aria-label={label} type="time" className="w-28" value={text} disabled={disabled} onChange={(e) => setText(e.target.value)}
-      onBlur={() => /^\d\d:\d\d$/.test(text) && text !== value ? onSave(text) : setText(value)} />
-  );
 }

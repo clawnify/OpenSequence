@@ -6,6 +6,8 @@ export type TouchStatus = "research" | "drafting" | "review" | "approved" | "sen
 export type Intent = "interested" | "not_interested" | "unsubscribe" | "out_of_office" | "other";
 
 export interface Sending {
+  /** The workspace's sending hours. */
+  hours: { timezone: string; ranges: SendRange[]; weekdays_only: boolean };
   mailbox: string | null;
   cap_today: number;
   sent_today: number;
@@ -40,6 +42,18 @@ export interface Overview {
   research: { agent: { id: string; name: string } | null; error: string | null };
 }
 
+export interface SendRange {
+  from: string;
+  until: string;
+}
+
+/** A campaign's own sending hours; any part left out is the workspace's. */
+export interface SendWindow {
+  timezone?: string;
+  ranges?: SendRange[];
+  weekdays_only?: boolean;
+}
+
 export interface Campaign {
   id: string;
   name: string;
@@ -53,6 +67,8 @@ export interface Campaign {
   /** null: the workspace default; "none": no signature; else a signature's id. */
   signature_id: string | null;
   reply_signature_id: string | null;
+  /** Its own sending hours over the workspace's; null: the workspace's. */
+  send_window: SendWindow | null;
   /** A list in another app of the workspace (OpenProspector) that new people come from, every day. */
   source: CampaignSource | null;
   people: number;
@@ -141,6 +157,8 @@ export interface TouchDetail {
   replies: Array<{ kind: string; intent: Intent | null; summary: string | null; excerpt: string; received_at: string }>;
   /** The signature this email gets when it goes out: plain text or HTML. */
   signature: string;
+  /** For an email waiting for approval or approved: the earliest it can go out, and in which hours. */
+  sending: { earliest_at: string; window: { timezone: string; ranges: SendRange[]; weekdays_only: boolean; own: boolean } } | null;
 }
 
 /** What the connected CRM knows about the person, read when a draft is opened (GET /api/touches/:id/crm). */
@@ -201,6 +219,7 @@ export interface SettingsView {
     ramp_from: string | null;
     send_from: string;
     send_until: string;
+    send_ranges: SendRange[];
     timezone: string;
     weekdays_only: boolean;
     crm_app_id: string | null;

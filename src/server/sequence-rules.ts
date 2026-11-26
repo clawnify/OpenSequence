@@ -10,12 +10,20 @@ export const DAY_MS = 86_400_000;
 
 // ── Time where the sender is ───────────────────────────────────────
 
+/** One stretch of the day an email may go out: "HH:MM" local, until after from. */
+export interface Range {
+  from: string;
+  until: string;
+}
+
 export interface Window {
   timezone: string; // IANA name, e.g. Europe/Amsterdam
-  send_from: string; // "HH:MM", local
-  send_until: string; // "HH:MM", local, after send_from
+  ranges: Range[]; // sorted, apart from each other: one or more stretches of the day
   weekdays_only: boolean;
 }
+
+export const MAX_RANGES = 4;
+export const MIN_RANGE_MINUTES = 30;
 
 export interface LocalParts {
   year: number;
@@ -99,24 +107,102 @@ function sendingDay(weekday: number, w: Window): boolean {
 
 export function inWindow(at: Date, w: Window): boolean {
   const p = localParts(at, w.timezone);
-  const from = minutesOf(w.send_from) ?? 0;
-  const until = minutesOf(w.send_until) ?? 0;
-  return sendingDay(p.weekday, w) && p.minutes >= from && p.minutes < until;
+  return sendingDay(p.weekday, w) && w.ranges.some((r) => p.minutes >= (minutesOf(r.from) ?? 0) && p.minutes < (minutesOf(r.until) ?? 0));
 }
 
-/** `at` itself when it falls inside the window, else the next time it opens. */
+/** `at` itself when it falls inside the window, else the next time a range opens. */
 export function nextWindowOpen(at: Date, w: Window): Date {
   if (inWindow(at, w)) return at;
   const p = localParts(at, w.timezone);
-  const from = minutesOf(w.send_from) ?? 0;
   for (let d = 0; d <= 7; d++) {
     const day = new Date(Date.UTC(p.year, p.month - 1, p.day + d));
-    const weekday = day.getUTCDay();
-    if (!sendingDay(weekday, w)) continue;
-    const open = zonedInstant(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), from, w.timezone);
-    if (open.getTime() > at.getTime()) return open;
+    if (!sendingDay(day.getUTCDay(), w)) continue;
+    for (const r of w.ranges) {
+      const open = zonedInstant(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), minutesOf(r.from) ?? 0, w.timezone);
+      if (open.getTime() > at.getTime()) return open;
+    }
   }
   return new Date(at.getTime() + DAY_MS); // unreachable with a valid window
+}
+
+// ── Sending hours as saved ─────────────────────────────────────────
+
+/** A list of ranges as a person or an agent sends it: each "HH:MM" to "HH:MM", at
+ *  least MIN_RANGE_MINUTES long, none touching another. Returned sorted. */
+export function validateRanges(input: unknown): { ranges: Range[] } | { error: string } {
+  if (!Array.isArray(input) || input.length === 0) return { error: "Sending hours are a list of ranges like [{\"from\": \"09:00\", \"until\": \"12:00\"}]" };
+  if (input.length > MAX_RANGES) return { error: `Sending hours have at most ${MAX_RANGES} ranges` };
+  const out: Range[] = [];
+  for (const raw of input) {
+    const r = (raw ?? {}) as Record<string, unknown>;
+    const from = minutesOf(r.from);
+    const until = minutesOf(r.until);
+    if (from === null || until === null) return { error: "Each range is a from and an until time like 09:00" };
+    if (until - from < MIN_RANGE_MINUTES) return { error: `Each range is at least ${MIN_RANGE_MINUTES} minutes, and ends after it starts` };
+    out.push({ from: (r.from as string).trim(), until: (r.until as string).trim() });
+  }
+  out.sort((a, b) => (minutesOf(a.from) ?? 0) - (minutesOf(b.from) ?? 0));
+  for (let i = 1; i < out.length; i++) {
+    if ((minutesOf(out[i].from) ?? 0) < (minutesOf(out[i - 1].until) ?? 0)) return { error: "Sending hours can't overlap" };
+  }
+  return { ranges: out };
+}
+
+/** Saved ranges (JSON), else the single range the workspace had before ranges. */
+export function rangesOrSingle(saved: string | null, from: string, until: string): Range[] {
+  if (saved) {
+    try {
+      const v = validateRanges(JSON.parse(saved));
+      if ("ranges" in v) return v.ranges;
+    } catch {
+      // fall through to the single range
+    }
+  }
+  return [{ from, until }];
+}
+
+/** What a campaign changes about the workspace's sending hours; each part is optional. */
+export interface WindowOverride {
+  timezone?: string;
+  ranges?: Range[];
+  weekdays_only?: boolean;
+}
+
+export function validateOverride(input: unknown): { override: WindowOverride | null } | { error: string } {
+  if (input === null) return { override: null };
+  if (typeof input !== "object" || Array.isArray(input)) return { error: "send_window is an object, or null to use the workspace's hours" };
+  const b = input as Record<string, unknown>;
+  const o: WindowOverride = {};
+  if (b.timezone !== undefined && b.timezone !== null) {
+    if (!isTimezone(b.timezone)) return { error: "timezone is a time zone name like America/New_York" };
+    o.timezone = b.timezone;
+  }
+  if (b.ranges !== undefined && b.ranges !== null) {
+    const v = validateRanges(b.ranges);
+    if ("error" in v) return v;
+    o.ranges = v.ranges;
+  }
+  if (b.weekdays_only !== undefined && b.weekdays_only !== null) {
+    if (typeof b.weekdays_only !== "boolean") return { error: "weekdays_only must be true or false" };
+    o.weekdays_only = b.weekdays_only;
+  }
+  return { override: Object.keys(o).length ? o : null };
+}
+
+/** The window a campaign sends in: the workspace's, with the campaign's own parts laid over it. */
+export function resolveWindow(base: Window, saved: string | null): Window {
+  if (!saved) return base;
+  try {
+    const v = validateOverride(JSON.parse(saved));
+    if ("error" in v || !v.override) return base;
+    return {
+      timezone: v.override.timezone ?? base.timezone,
+      ranges: v.override.ranges ?? base.ranges,
+      weekdays_only: v.override.weekdays_only ?? base.weekdays_only,
+    };
+  } catch {
+    return base;
+  }
 }
 
 /** Whole days from one YYYY-MM-DD to another (negative when `to` is earlier). */
@@ -147,7 +233,7 @@ export function dailyCap(cap: number, rampFrom: string | null, today: string): n
 /** The gap between two sends: the day's emails spread across the window, never
  *  closer than 2 minutes and never more than an hour apart. */
 export function sendGapMs(w: Window, cap: number): number {
-  const span = (minutesOf(w.send_until) ?? 0) - (minutesOf(w.send_from) ?? 0);
+  const span = w.ranges.reduce((n, r) => n + (minutesOf(r.until) ?? 0) - (minutesOf(r.from) ?? 0), 0);
   const gap = Math.floor(Math.max(span, 0) / Math.max(cap, 1));
   return Math.min(Math.max(gap, 2), 60) * MINUTE_MS;
 }
@@ -158,11 +244,12 @@ export interface SendState {
 }
 
 /** When the next email may go out: inside the window, under the day's cap,
- *  and a gap after the last one. At or before `now` means now. */
-export function nextSendAt(now: Date, w: Window, cap: number, s: SendState): Date {
+ *  and a gap after the last one. At or before `now` means now. The cap's day is
+ *  the workspace's (`capZone`), which a campaign's own time zone may differ from. */
+export function nextSendAt(now: Date, w: Window, cap: number, s: SendState, capZone: string = w.timezone): Date {
   if (cap <= 0 || s.sentToday >= cap) {
-    const tomorrow = new Date(dayStart(now, w.timezone).getTime() + DAY_MS + 2 * 60 * MINUTE_MS);
-    return nextWindowOpen(dayStart(tomorrow, w.timezone), w);
+    const tomorrow = new Date(dayStart(now, capZone).getTime() + DAY_MS + 2 * 60 * MINUTE_MS);
+    return nextWindowOpen(dayStart(tomorrow, capZone), w);
   }
   const last = s.lastSentAt ? Date.parse(s.lastSentAt) : NaN;
   const earliest = Number.isNaN(last) ? now : new Date(Math.max(now.getTime(), last + sendGapMs(w, cap)));

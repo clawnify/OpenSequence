@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS settings (
   ramp_from TEXT,                           -- YYYY-MM-DD a new mailbox started sending: the daily cap climbs from it
   send_from TEXT NOT NULL DEFAULT '09:00',  -- the sending window, local time
   send_until TEXT NOT NULL DEFAULT '17:00',
+  send_ranges TEXT,                         -- JSON [{from, until}]: several stretches of the day; null: send_from to send_until
   timezone TEXT NOT NULL DEFAULT 'UTC',     -- IANA name, e.g. Europe/Amsterdam
   weekdays_only INTEGER NOT NULL DEFAULT 1,
   crm_app_id TEXT,                          -- a sibling CRM app that sends, replies and meetings are written to
@@ -53,6 +54,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   skip_known INTEGER NOT NULL DEFAULT 1,    -- people the CRM knows (their company a customer, a deal open, a call booked) stay out as they join; 0 for a campaign meant for them
   signature_id TEXT,                        -- first emails: null = the workspace default, 'none' = no signature, else a signature
   reply_signature_id TEXT,                  -- follow-ups: the same
+  send_window TEXT,                         -- JSON {timezone?, ranges?, weekdays_only?}: its own sending hours over the workspace's; null: the workspace's
   source_app_id TEXT,                       -- an app in the workspace that keeps lists of people (OpenProspector); null: none
   source_list_id TEXT,                      -- the list new people come from, every day
   source_list_name TEXT,                    -- its name when it was picked, for the screens
