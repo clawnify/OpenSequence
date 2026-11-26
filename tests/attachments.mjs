@@ -162,7 +162,7 @@ test('Google Workspace mailbox is verified by profile and never falls back to an
     if (req.endpoint.endsWith('/messages/m')) return { successful: true, data: { id: 'm', threadId: 'th', internalDate: String(now.getTime()), payload: { headers: [{ name: 'From', value: 'mailer-daemon@example.com' }, { name: 'Subject', value: 'Delivery failed' }] } } };
     return original(service, org, req, { account: 'sender@example.com' });
   };
-  assert.deepEqual(await mailboxes(f.env), [{ address: 'sender@example.com', isDefault: true }]);
+  assert.deepEqual(await mailboxes(f.env), [{ address: 'sender@example.com', isDefault: true, personal: false, owner: null }]);
   const mail = await mailFor(f.env, 'sender@example.com');
   const page = await mail.run('FETCH_EMAILS', { query: 'test', max_results: 10 });
   assert.equal(page.messages[0].sender, 'mailer-daemon@example.com');
@@ -235,7 +235,7 @@ test('unavailable or mismatched saved mailboxes cannot be selected or reported r
   await assert.rejects(() => mailFor(f.env, 'sender@example.com'), /couldn't be verified/);
   const save = await f.call('PUT', '/api/settings', { mailbox: 'sender@example.com' });
   assert.equal(save.status, 400);
-  assert.match(save.data.error, /isn't a Gmail account connected/);
+  assert.match(save.data.error, /isn't a Gmail account this app can use/);
   assert.equal((await f.call('GET', '/api/overview')).data.ready.mailbox, false);
   assert.equal(f.db.prepare('SELECT mailbox FROM settings').get().mailbox, 'sender@example.com');
   f.env.CREDENTIALS.executeTool = original;

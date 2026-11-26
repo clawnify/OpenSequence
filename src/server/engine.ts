@@ -30,8 +30,9 @@ import {
   type CrmKnown, type ListLead, type ResearchWaiting, type Window,
 } from "./sequence-rules.js";
 import {
-  OPEN_TOUCH, advance, cleanPerson, endEnrollments, enroll, getSettings, isPersonal, parts, personName, signatureBodies, skipOpenTouches, stepsOf,
-  stopAround, stopCompany, unsubscribe, upsertPerson, type Campaign, type Enrollment, type Person, type Settings, type Touch,
+  OPEN_TOUCH, advance, cleanPerson, endEnrollments, enroll, getSettings, isPersonal, mailboxOf, mailboxState, mailboxesInUse, parts, personName,
+  saveMailbox, signatureBodies, skipOpenTouches, stepsOf, stopAround, stopCompany, unsubscribe, upsertPerson,
+  type Campaign, type Enrollment, type MailboxState, type Person, type Settings, type Touch,
 } from "./store.js";
 
 export type EngineEnv = ConnectionsEnv & AiEnv & PlatformEnv & {
@@ -74,15 +75,48 @@ export function campaignWindow(s: Settings, sendWindow: string | null): Window {
   return resolveWindow(windowOf(s), sendWindow);
 }
 
+/** The mailboxes in use now: see mailboxesInUse. */
+export function inUse(s: Settings, now: Date): Promise<string[]> {
+  return mailboxesInUse(s, new Date(now.getTime() - LATE_REPLY_MS).toISOString());
+}
+
+/** Emails sent today, by the mailbox they went out from. Sends from before
+ *  touches recorded their mailbox count for their thread's, else the workspace's. */
+export async function sentTodayBy(s: Settings, now: Date): Promise<Map<string, number>> {
+  const rows = await query<{ address: string | null; n: number }>(
+    `SELECT COALESCE(t.mailbox, e.mailbox) AS address, COUNT(*) AS n FROM touches t JOIN enrollments e ON e.id = t.enrollment_id
+      WHERE t.status = 'sent' AND t.sent_at >= ? GROUP BY COALESCE(t.mailbox, e.mailbox)`,
+    [dayStart(now, s.timezone).toISOString()],
+  );
+  const out = new Map<string, number>();
+  for (const r of rows) {
+    const key = r.address ?? s.mailbox ?? "";
+    out.set(key, (out.get(key) ?? 0) + r.n);
+  }
+  return out;
+}
+
+/** A mailbox's cap today: its own, climbing from its warm-up start. The day is the workspace's. */
+export function capOf(m: MailboxState, s: Settings, now: Date): number {
+  return dailyCap(m.daily_cap, m.ramp_from, localDay(now, s.timezone));
+}
+
+/** When the next email from a mailbox may go out, in a campaign's hours: under the
+ *  mailbox's cap today and a gap after its last send. */
+export function nextFrom(m: MailboxState, w: Window, s: Settings, now: Date, sentToday: Map<string, number>): Date {
+  return nextSendAt(now, w, capOf(m, s, now), { sentToday: sentToday.get(m.address) ?? 0, lastSentAt: m.last_sent_at }, s.timezone);
+}
+
 /** When an approved email of a campaign may go out at the earliest: due, inside the
- *  campaign's hours, under the workspace's cap and a gap after the last send. */
-export async function earliestSend(s: Settings, sendWindow: string | null, dueAt: string | null, now: Date): Promise<Date> {
-  const cap = dailyCap(s.daily_cap, s.ramp_from, localDay(now, s.timezone));
-  const sentToday = (await get<{ n: number }>("SELECT COUNT(*) AS n FROM touches WHERE status = 'sent' AND sent_at >= ?", [dayStart(now, s.timezone).toISOString()]))?.n ?? 0;
+ *  campaign's hours, under its mailbox's cap and a gap after that mailbox's last
+ *  send. Null when the campaign has no mailbox to send from. */
+export async function earliestSend(s: Settings, campaign: { send_window: string | null; mailbox: string | null }, dueAt: string | null, now: Date): Promise<Date | null> {
+  const address = mailboxOf(campaign, s);
+  if (!address) return null;
   const due = dueAt ? Date.parse(dueAt) : NaN;
   const from = Number.isNaN(due) || due < now.getTime() ? now : new Date(due);
-  const w = campaignWindow(s, sendWindow);
-  const at = nextSendAt(now, w, cap, { sentToday, lastSentAt: s.last_sent_at }, s.timezone);
+  const w = campaignWindow(s, campaign.send_window);
+  const at = nextFrom(await mailboxState(address, s), w, s, now, await sentTodayBy(s, now));
   // Due on a later day: today's cap and spacing no longer apply, only the hours.
   return at.getTime() >= from.getTime() ? at : nextWindowOpen(from, w);
 }
@@ -99,25 +133,33 @@ interface Ctx {
   s: Settings;
   now: Date;
   deadline: number;
-  /** The sending mailbox, opened once per run. */
-  mail: Mail | null;
-  mailError: string | null;
+  /** Each mailbox needed, opened once per run, by address. */
+  mail: Map<string, Mail>;
+  /** Why a mailbox couldn't be opened, by address ("" when none was picked). */
+  mailErrors: Map<string, string>;
   done: { sent: number; drafted: number; replies: number; meetings: number };
   more: boolean;
 }
 
-async function openMail(ctx: Ctx): Promise<Mail | null> {
-  if (ctx.mail || ctx.mailError) return ctx.mail;
-  if (!ctx.s.mailbox) {
-    ctx.mailError = "Pick the mailbox to send from in Settings";
+/** A mailbox, opened once per run. One that can't be opened holds up only what goes through it. */
+async function openMail(ctx: Ctx, address: string | null): Promise<Mail | null> {
+  if (!address) {
+    ctx.mailErrors.set("", "Pick the mailbox to send from in Settings");
     return null;
   }
+  const open = ctx.mail.get(address);
+  if (open || ctx.mailErrors.has(address)) return open ?? null;
   try {
-    ctx.mail = await mailFor(ctx.env, ctx.s.mailbox);
+    const mail = await mailFor(ctx.env, address);
+    ctx.mail.set(address, mail);
+    await run("UPDATE mailboxes SET error = NULL WHERE address = ? AND error IS NOT NULL", [address]);
+    return mail;
   } catch (e) {
-    ctx.mailError = (e as Error).message;
+    const msg = (e as Error).message.slice(0, 300);
+    ctx.mailErrors.set(address, msg);
+    await run("UPDATE mailboxes SET error = ? WHERE address = ?", [msg, address]);
+    return null;
   }
-  return ctx.mail;
 }
 
 // ── The CRM ────────────────────────────────────────────────────────
@@ -304,24 +346,34 @@ interface InboxCursor {
   started: string;
 }
 
-/** Received mail since the last read, a few pages per run; a read that doesn't
- *  finish carries on from its page next run. */
+/** Received mail in each mailbox in use since its last read, a few pages per
+ *  run; a read that doesn't finish carries on from its page next run. */
 async function checkInbox(ctx: Ctx, force: boolean): Promise<void> {
-  const s = ctx.s;
+  const since = new Date(ctx.now.getTime() - LATE_REPLY_MS).toISOString();
+  for (const address of await mailboxesInUse(ctx.s, since)) {
+    if (Date.now() > ctx.deadline) {
+      ctx.more = true;
+      return;
+    }
+    await checkMailbox(ctx, await mailboxState(address, ctx.s), force);
+  }
+}
+
+async function checkMailbox(ctx: Ctx, m: MailboxState, force: boolean): Promise<void> {
   let cursor: InboxCursor | null = null;
   try {
-    cursor = s.inbox_cursor ? (JSON.parse(s.inbox_cursor) as InboxCursor) : null;
+    cursor = m.inbox_cursor ? (JSON.parse(m.inbox_cursor) as InboxCursor) : null;
   } catch {
     cursor = null;
   }
-  if (!s.inbox_checked_at && !cursor) {
-    // Nothing went out before the first run: start reading from here.
-    await run("UPDATE settings SET inbox_checked_at = ? WHERE id = 1", [ctx.now.toISOString()]);
+  if (!m.inbox_checked_at && !cursor) {
+    // Nothing went out from it before its first read: start reading from here.
+    await saveMailbox(m.address, { inbox_checked_at: ctx.now.toISOString() });
     return;
   }
-  const last = s.inbox_checked_at ? Date.parse(s.inbox_checked_at) : ctx.now.getTime();
+  const last = m.inbox_checked_at ? Date.parse(m.inbox_checked_at) : ctx.now.getTime();
   if (!cursor && !force && ctx.now.getTime() - last < INBOX_INTERVAL_MS) return;
-  const mail = await openMail(ctx);
+  const mail = await openMail(ctx, m.address);
   if (!mail) return;
   const after = cursor?.after ?? Math.floor((last - INBOX_OVERLAP_MS) / 1000);
   const started = cursor?.started ?? ctx.now.toISOString();
@@ -336,9 +388,9 @@ async function checkInbox(ctx: Ctx, force: boolean): Promise<void> {
   }
   if (page) {
     ctx.more = true;
-    await run("UPDATE settings SET inbox_cursor = ? WHERE id = 1", [JSON.stringify({ after, page, started } satisfies InboxCursor)]);
+    await saveMailbox(m.address, { inbox_cursor: JSON.stringify({ after, page, started } satisfies InboxCursor) });
   } else {
-    await run("UPDATE settings SET inbox_cursor = NULL, inbox_checked_at = ? WHERE id = 1", [started]);
+    await saveMailbox(m.address, { inbox_cursor: null, inbox_checked_at: started });
   }
 }
 
@@ -396,10 +448,11 @@ async function checkCalendar(ctx: Ctx, force: boolean): Promise<void> {
   const from = new Date(ctx.now.getTime() - DAY_MS).toISOString();
   const to = new Date(ctx.now.getTime() + CALENDAR_AHEAD_MS).toISOString();
   const guests = new Map<string, string>(); // address → when
-  // Our own domains: the sending mailbox's, and the calendar owner's (the
+  // Our own domains: the sending mailboxes', and the calendar owner's (the
   // attendee marked as us). A colleague in an internal meeting is not a
   // company booking one.
-  const own = new Set<string>(ctx.s.mailbox ? [emailDomain(ctx.s.mailbox)] : []);
+  const sending = await mailboxesInUse(ctx.s, new Date(ctx.now.getTime() - LATE_REPLY_MS).toISOString());
+  const own = new Set<string>(sending.map(emailDomain));
   let page: string | null = null;
   for (let i = 0; i < 3; i++) {
     const res = await calendarPage(cal, from, to, page);
@@ -704,19 +757,18 @@ async function draftNext(ctx: Ctx): Promise<void> {
 
 // ── Sending ────────────────────────────────────────────────────────
 
-async function markSent(ctx: Ctx, t: Touch, e: Enrollment, sent: { messageId: string; threadId: string }, at: Date, out: { subject: string | null; body: string }): Promise<void> {
+async function markSent(ctx: Ctx, t: Touch, e: Enrollment, sent: { messageId: string; threadId: string }, at: Date, out: { subject: string | null; body: string }, address: string): Promise<void> {
   const iso = at.toISOString();
   await run(
-    `UPDATE touches SET status = 'sent', sent_subject = ?, sent_body = ?, message_id = ?, sent_at = ?, error = NULL, updated_at = datetime('now')
+    `UPDATE touches SET status = 'sent', sent_subject = ?, sent_body = ?, message_id = ?, sent_at = ?, mailbox = ?, error = NULL, updated_at = datetime('now')
       WHERE id = ?`,
-    [out.subject, out.body, sent.messageId, iso, t.id],
+    [out.subject, out.body, sent.messageId, iso, address, t.id],
   );
   await run(
     "UPDATE enrollments SET thread_id = COALESCE(thread_id, ?), mailbox = COALESCE(mailbox, ?), last_sent_at = ?, updated_at = datetime('now') WHERE id = ?",
-    [sent.threadId, ctx.s.mailbox, iso, e.id],
+    [sent.threadId, address, iso, e.id],
   );
-  await run("UPDATE settings SET last_sent_at = ? WHERE id = 1", [iso]);
-  ctx.s.last_sent_at = iso;
+  await run("UPDATE mailboxes SET last_sent_at = ? WHERE address = ? AND (last_sent_at IS NULL OR last_sent_at < ?)", [iso, address, iso]);
   await advance(e.id, t.position, at);
   ctx.done.sent++;
   const person = await get<Person>("SELECT * FROM people WHERE id = ?", [e.person_id]);
@@ -724,7 +776,7 @@ async function markSent(ctx: Ctx, t: Touch, e: Enrollment, sent: { messageId: st
     const campaign = await campaignName(e.campaign_id);
     await crmLog(ctx, person, "email", e.thread_id
       ? `Follow-up ${t.position} sent in the "${campaign}" sequence.`
-      : `Sent "${out.subject ?? ""}" (the "${campaign}" sequence, from ${ctx.s.mailbox}).`);
+      : `Sent "${out.subject ?? ""}" (the "${campaign}" sequence, from ${address}).`);
   }
 }
 
@@ -734,17 +786,23 @@ async function markSent(ctx: Ctx, t: Touch, e: Enrollment, sent: { messageId: st
  * sent. Not found: approved again, and the next send retries it.
  */
 async function settle(ctx: Ctx): Promise<void> {
+  // A few looked up per run. One whose mailbox can't be opened is passed over,
+  // so it never holds up another mailbox's: the list reaches past it.
   const stuck = await query<Touch>(
-    "SELECT * FROM touches WHERE status = 'sending' AND sending_at < ? ORDER BY sending_at LIMIT 5",
+    "SELECT * FROM touches WHERE status = 'sending' AND sending_at < ? ORDER BY sending_at LIMIT 50",
     [new Date(ctx.now.getTime() - SETTLE_AFTER_MS).toISOString()],
   );
-  if (!stuck.length) return;
-  const mail = await openMail(ctx);
-  if (!mail) return;
+  let looked = 0;
   for (const t of stuck) {
+    if (looked >= 5) break;
     const e = await get<Enrollment>("SELECT * FROM enrollments WHERE id = ?", [t.enrollment_id]);
     const person = e ? await get<Person>("SELECT * FROM people WHERE id = ?", [e.person_id]) : undefined;
     if (!e || !person) continue;
+    // Looked up where it was handed to Gmail: sends from before touches recorded it went from the thread's or the workspace's.
+    const address = t.mailbox ?? e.mailbox ?? ctx.s.mailbox;
+    const mail = await openMail(ctx, address);
+    if (!mail || !address) continue;
+    looked++;
     const since = Date.parse(t.sending_at!) - MINUTE_MS;
     let found: GmailMessage | undefined;
     if (e.thread_id) {
@@ -758,7 +816,7 @@ async function settle(ctx: Ctx): Promise<void> {
     if (found?.messageId && found.threadId) {
       await markSent(ctx, t, e, { messageId: found.messageId, threadId: found.threadId }, new Date(Date.parse(found.messageTimestamp ?? "") || Date.parse(t.sending_at!)), {
         subject: t.sent_subject, body: t.sent_body ?? "",
-      });
+      }, address);
     } else {
       const failed = t.attempts + 1 >= MAX_ATTEMPTS;
       await run(
@@ -810,16 +868,19 @@ async function handSentContext(env: EngineEnv, enrollmentId: string, now: Date) 
   const person = await get<Person>("SELECT * FROM people WHERE id = ?", [e.person_id]);
   if (!person) throw new HandSentError("No such person", 404);
   const s = await getSettings();
-  if (!s.mailbox) throw new HandSentError("Pick the mailbox Sequence sends from in Settings first", 409);
-  if (e.mailbox && e.mailbox !== s.mailbox) throw new HandSentError(`This sequence's thread is in ${e.mailbox}: send from it again in Settings first`, 409);
+  // The mailbox this sequence sends from: its campaign's, else the workspace's.
+  const campaign = await get<{ mailbox: string | null }>("SELECT mailbox FROM campaigns WHERE id = ?", [e.campaign_id]);
+  const address = mailboxOf(campaign, s);
+  if (!address) throw new HandSentError("Pick the mailbox Sequence sends from, on the campaign or in Settings, first", 409);
+  if (e.mailbox && e.mailbox !== address) throw new HandSentError(`This sequence's thread is in ${e.mailbox}: send the campaign from it again first`, 409);
   let mail: Mail;
   try {
-    mail = await mailFor(env, s.mailbox);
+    mail = await mailFor(env, address);
   } catch (err) {
     throw new HandSentError((err as Error).message, 409);
   }
   const ctx: Ctx = {
-    env, s, now, deadline: Date.now() + RUN_BUDGET_MS, mail, mailError: null,
+    env, s, now, deadline: Date.now() + RUN_BUDGET_MS, mail: new Map([[address, mail]]), mailErrors: new Map(),
     done: { sent: 0, drafted: 0, replies: 0, meetings: 0 }, more: false,
   };
   return { ctx, e, step, person, mail };
@@ -909,15 +970,15 @@ export async function countSentByHand(
   // went out for it, the email isn't counted, and no other sequence owns the
   // thread. A send claims its step under the same conditions.
   const inserted = await query<{ id: string }>(
-    `INSERT INTO touches (id, enrollment_id, step_id, position, channel, status, subject, body, sent_subject, sent_body, written_by, message_id, sent_at, done_by)
-     SELECT ?, ?, ?, ?, 'email', 'sent', ?, ?, ?, ?, 'person', ?, ?, ?
+    `INSERT INTO touches (id, enrollment_id, step_id, position, channel, status, subject, body, sent_subject, sent_body, written_by, message_id, sent_at, done_by, mailbox)
+     SELECT ?, ?, ?, ?, 'email', 'sent', ?, ?, ?, ?, 'person', ?, ?, ?, ?
       WHERE EXISTS (SELECT 1 FROM enrollments WHERE id = ? AND step = ? AND status IN ('active', 'paused'))
         AND NOT EXISTS (SELECT 1 FROM touches WHERE enrollment_id = ? AND position = ? AND status IN ('sending', 'sent'))
         AND NOT EXISTS (SELECT 1 FROM touches WHERE message_id = ?)
         AND NOT EXISTS (SELECT 1 FROM enrollments WHERE thread_id = ? AND id != ?)
      RETURNING id`,
     [
-      id, e.id, step.id, e.step, subject, ownWords(text, 5000), subject, text.slice(0, 20_000), m.messageId, sentAt, by,
+      id, e.id, step.id, e.step, subject, ownWords(text, 5000), subject, text.slice(0, 20_000), m.messageId, sentAt, by, mail.address,
       e.id, e.step, e.id, e.step, m.messageId, m.threadId, e.id,
     ],
   );
@@ -939,44 +1000,59 @@ export async function countSentByHand(
   return { touch_id: id, replies: ctx.done.replies };
 }
 
-async function sendNext(ctx: Ctx, cap: number): Promise<Date | null> {
-  const sentToday = (await get<{ n: number }>("SELECT COUNT(*) AS n FROM touches WHERE status = 'sent' AND sent_at >= ?", [dayStart(ctx.now, ctx.s.timezone).toISOString()]))?.n ?? 0;
+async function sendNext(ctx: Ctx): Promise<Date | null> {
   const READY = `FROM touches t
        JOIN enrollments e ON e.id = t.enrollment_id AND e.status = 'active' AND e.step = t.position
        JOIN campaigns c ON c.id = e.campaign_id AND c.status = 'active'
        JOIN people p ON p.id = e.person_id AND p.unsubscribed_at IS NULL AND p.bounced_at IS NULL
       WHERE t.status = 'approved' AND t.channel = 'email' AND e.due_at <= ?`;
-  // Each campaign sends in its own hours, so the oldest email may wait while
-  // another campaign's window is open: pick among the campaigns open now.
-  const waiting = await query<{ id: string; send_window: string | null }>(
-    `SELECT DISTINCT c.id, c.send_window ${READY}`, [ctx.now.toISOString()],
+  // Each campaign sends in its own hours, from its own mailbox at that
+  // mailbox's pace, so the oldest email may wait while another can go: pick
+  // among the campaigns that can send now.
+  const waiting = await query<{ id: string; send_window: string | null; mailbox: string | null }>(
+    `SELECT DISTINCT c.id, c.send_window, c.mailbox ${READY}`, [ctx.now.toISOString()],
   );
   if (!waiting.length) return null;
-  const open: string[] = [];
+  const sentToday = await sentTodayBy(ctx.s, ctx.now);
+  const fromOf = new Map<string, string>(); // campaign → mailbox
   let soonest: Date | null = null;
   for (const c of waiting) {
-    const when = nextSendAt(ctx.now, campaignWindow(ctx.s, c.send_window), cap, { sentToday, lastSentAt: ctx.s.last_sent_at }, ctx.s.timezone);
-    if (when.getTime() <= ctx.now.getTime()) open.push(c.id);
+    const address = mailboxOf(c, ctx.s);
+    if (!address) {
+      await openMail(ctx, null); // says a mailbox is needed
+      continue;
+    }
+    const when = nextFrom(await mailboxState(address, ctx.s), campaignWindow(ctx.s, c.send_window), ctx.s, ctx.now, sentToday);
+    if (when.getTime() <= ctx.now.getTime()) fromOf.set(c.id, address);
     else if (!soonest || when < soonest) soonest = when;
   }
-  if (!open.length) return soonest;
-  // shortcut: the first 50 open campaigns; the rest get their turn as these empty. Raise it if a workspace runs more at once.
-  const ids = open.slice(0, 50);
-  const ready = await get<Touch & { campaign_id: string; person_id: string; thread_id: string | null; email: string }>(
-    `SELECT t.*, e.campaign_id, e.person_id, e.thread_id, p.email ${READY} AND c.id IN (${inList(ids.length)})
-      ORDER BY e.due_at, t.approved_at LIMIT 1`,
-    [ctx.now.toISOString(), ...ids],
-  );
-  if (!ready) return null;
-  const mail = await openMail(ctx);
-  if (!mail) return null;
+  // A mailbox that can't be opened holds up only its own campaigns.
+  let ready: (Touch & { campaign_id: string; person_id: string; thread_id: string | null; email: string }) | undefined;
+  let address = "";
+  let mail: Mail | null = null;
+  while (fromOf.size) {
+    // shortcut: the first 50 campaigns that can send; the rest get their turn as these empty. Raise it if a workspace runs more at once.
+    const ids = [...fromOf.keys()].slice(0, 50);
+    ready = await get<Touch & { campaign_id: string; person_id: string; thread_id: string | null; email: string }>(
+      `SELECT t.*, e.campaign_id, e.person_id, e.thread_id, p.email ${READY} AND c.id IN (${inList(ids.length)})
+        ORDER BY e.due_at, t.approved_at LIMIT 1`,
+      [ctx.now.toISOString(), ...ids],
+    );
+    if (!ready) return soonest;
+    address = fromOf.get(ready.campaign_id)!;
+    mail = await openMail(ctx, address);
+    if (mail) break;
+    for (const [id, from] of fromOf) if (from === address) fromOf.delete(id);
+    ready = undefined;
+  }
+  if (!ready || !mail) return soonest;
   const e = (await get<Enrollment>("SELECT * FROM enrollments WHERE id = ?", [ready.enrollment_id]))!;
 
   // A thread lives in the mailbox that started it: another mailbox can't reply in it.
-  if (e.thread_id && e.mailbox && e.mailbox !== mail.address) {
+  if (e.thread_id && e.mailbox && e.mailbox !== address) {
     await run(
       "UPDATE enrollments SET status = 'paused', paused_until = NULL, reason = ?, updated_at = datetime('now') WHERE id = ? AND status = 'active'",
-      [`This thread was started from ${e.mailbox}: send from it again in Settings to carry on`, e.id],
+      [`This thread was started from ${e.mailbox}: send the campaign from it again to carry on`, e.id],
     );
     return ctx.now;
   }
@@ -1015,12 +1091,12 @@ async function sendNext(ctx: Ctx, cap: number): Promise<Date | null> {
     return ctx.now;
   }
   const claimed = await query<{ id: string }>(
-    `UPDATE touches SET status = 'sending', sending_at = ?, sent_subject = ?, sent_body = ?, updated_at = datetime('now')
+    `UPDATE touches SET status = 'sending', sending_at = ?, sent_subject = ?, sent_body = ?, mailbox = ?, updated_at = datetime('now')
       WHERE id = ? AND status = 'approved' AND attachments = ? AND subject IS ? AND body IS ? AND approved_at IS ?
         AND EXISTS (SELECT 1 FROM enrollments e WHERE e.id = touches.enrollment_id AND e.step = touches.position AND e.status = 'active')
         AND NOT EXISTS (SELECT 1 FROM touches o WHERE o.enrollment_id = touches.enrollment_id AND o.position = touches.position AND o.status IN ('sending', 'sent'))
       RETURNING id`,
-    [ctx.now.toISOString(), subject, body, ready.id, ready.attachments, ready.subject, ready.body, ready.approved_at],
+    [ctx.now.toISOString(), subject, body, address, ready.id, ready.attachments, ready.subject, ready.body, ready.approved_at],
   );
   if (!claimed.length) return ctx.now;
   try {
@@ -1029,7 +1105,7 @@ async function sendNext(ctx: Ctx, cap: number): Promise<Date | null> {
       : e.thread_id
       ? await sendReply(mail, ready.email, e.thread_id, body, out.html)
       : await sendNew(mail, ready.email, subject!, body, out.html);
-    await markSent(ctx, ready, e, sent, new Date(), { subject, body });
+    await markSent(ctx, ready, e, sent, new Date(), { subject, body }, address);
   } catch (err) {
     // Gmail may still have taken it: the touch stays 'sending' and is looked up before anything else goes out.
     await run("UPDATE touches SET error = ? WHERE id = ?", [(err as Error).message.slice(0, 300), ready.id]);
@@ -1086,10 +1162,9 @@ export async function runOnce(env: EngineEnv, now = new Date(), opts: { force?: 
     s.next_run_at = null;
   }
   const ctx: Ctx = {
-    env, s, now, deadline: Date.now() + RUN_BUDGET_MS, mail: null, mailError: null,
+    env, s, now, deadline: Date.now() + RUN_BUDGET_MS, mail: new Map(), mailErrors: new Map(),
     done: { sent: 0, drafted: 0, replies: 0, meetings: 0 }, more: false,
   };
-  const cap = dailyCap(s.daily_cap, s.ramp_from, localDay(now, s.timezone));
   let sendAt: Date | null = null;
   let error: string | null = null;
   try {
@@ -1099,15 +1174,15 @@ export async function runOnce(env: EngineEnv, now = new Date(), opts: { force?: 
     await checkCalendar(ctx, !!opts.force);
     await resumePaused(now);
     await pullLists(ctx);
-    await prepare(ctx, cap);
+    await prepare(ctx, await totalCap(ctx));
     await handResearch(ctx, opts.origin ?? null);
     await draftNext(ctx);
-    if (Date.now() < ctx.deadline) sendAt = await sendNext(ctx, cap);
+    if (Date.now() < ctx.deadline) sendAt = await sendNext(ctx);
     else ctx.more = true;
   } catch (e) {
     error = (e as Error).message.slice(0, 500);
   }
-  if (!error && ctx.mailError && (await hasMailWork())) error = ctx.mailError;
+  if (!error && ctx.mailErrors.size && (await hasMailWork())) error = [...ctx.mailErrors.values()].join(" ").slice(0, 500);
 
   let next: Date | null = null;
   if (await hasWork(now)) {
@@ -1127,6 +1202,17 @@ export async function runOnce(env: EngineEnv, now = new Date(), opts: { force?: 
     next: next ? next.toISOString() : null,
     ...(error ? { error } : {}),
   };
+}
+
+/** What the mailboxes live campaigns send from may send today, together: how much the queue prepares for. */
+async function totalCap(ctx: Ctx): Promise<number> {
+  // The mailboxes live campaigns send from: one only still reading replies sends nothing new.
+  const rows = await query<{ mailbox: string | null }>("SELECT DISTINCT mailbox FROM campaigns WHERE status = 'active'");
+  const sending = new Set(rows.map((r) => r.mailbox ?? ctx.s.mailbox).filter((m): m is string => !!m));
+  let cap = 0;
+  for (const address of sending) cap += capOf(await mailboxState(address, ctx.s), ctx.s, ctx.now);
+  // No mailbox picked yet: drafts still get ready to review, at the workspace's cap.
+  return cap || ctx.s.daily_cap;
 }
 
 /** Whether the missing mailbox is holding anything up: an approved email, or a thread to read. */

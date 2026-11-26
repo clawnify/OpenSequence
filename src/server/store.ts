@@ -37,11 +37,14 @@ export interface Settings {
   last_sent_at: string | null;
   inbox_checked_at: string | null;
   inbox_cursor: string | null;
+  mailboxes_moved_at: string | null;
   calendar_checked_at: string | null;
 }
 
 export interface Campaign {
   id: string;
+  /** The address its emails go out from; null: the workspace's. */
+  mailbox: string | null;
   name: string;
   angle: string;
   status: "draft" | "active" | "paused" | "archived";
@@ -140,6 +143,7 @@ export interface Touch {
   approved_by: string | null;
   approved_at: string | null;
   sending_at: string | null;
+  mailbox: string | null;
   sent_at: string | null;
   done_by: string | null;
   created_at: string;
@@ -181,6 +185,73 @@ export async function getSettings(): Promise<Settings> {
     return (await get<Settings>("SELECT * FROM settings WHERE id = 1"))!;
   }
   return s;
+}
+
+// ── Mailboxes ──────────────────────────────────────────────────────
+
+/** One sending mailbox's pace and reading. */
+export interface MailboxState {
+  address: string;
+  daily_cap: number;
+  ramp_from: string | null;
+  last_sent_at: string | null;
+  inbox_checked_at: string | null;
+  inbox_cursor: string | null;
+  error: string | null;
+}
+
+/**
+ * A mailbox's row, made the first time it is used. Settings held one
+ * mailbox's pace and reading before each had a row: the mailbox Settings
+ * sent from takes them over, once. Any other starts at the workspace's cap,
+ * with no warm-up and nothing read yet.
+ */
+export async function mailboxState(address: string, s: Settings): Promise<MailboxState> {
+  const found = await get<MailboxState>("SELECT * FROM mailboxes WHERE address = ?", [address]);
+  if (found) return found;
+  const moving = address === s.mailbox && !s.mailboxes_moved_at
+    && (await query<{ id: number }>("UPDATE settings SET mailboxes_moved_at = ? WHERE id = 1 AND mailboxes_moved_at IS NULL RETURNING id", [nowIso()])).length === 1;
+  if (moving) {
+    s.mailboxes_moved_at = nowIso();
+    await run(
+      `INSERT INTO mailboxes (address, daily_cap, ramp_from, last_sent_at, inbox_checked_at, inbox_cursor) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (address) DO UPDATE SET daily_cap = excluded.daily_cap, ramp_from = excluded.ramp_from, last_sent_at = excluded.last_sent_at,
+          inbox_checked_at = excluded.inbox_checked_at, inbox_cursor = excluded.inbox_cursor`,
+      [address, s.daily_cap, s.ramp_from, s.last_sent_at, s.inbox_checked_at, s.inbox_cursor],
+    );
+  } else {
+    await run("INSERT OR IGNORE INTO mailboxes (address, daily_cap) VALUES (?, ?)", [address, s.daily_cap]);
+  }
+  return (await get<MailboxState>("SELECT * FROM mailboxes WHERE address = ?", [address]))!;
+}
+
+export async function saveMailbox(address: string, patch: Partial<Omit<MailboxState, "address">>): Promise<void> {
+  const keys = Object.keys(patch) as Array<keyof typeof patch>;
+  if (!keys.length) return;
+  await run(
+    `UPDATE mailboxes SET ${keys.map((k) => `${k} = ?`).join(", ")}, updated_at = datetime('now') WHERE address = ?`,
+    [...keys.map((k) => patch[k] ?? null), address],
+  );
+}
+
+/** The mailbox a campaign sends from: its own, else the workspace's. */
+export const mailboxOf = (c: { mailbox: string | null } | null | undefined, s: Settings): string | null => c?.mailbox ?? s.mailbox;
+
+/**
+ * The mailboxes in use: the workspace's, each live campaign's, and each that a
+ * thread still waiting on an answer was sent from. These are the ones read and
+ * paced.
+ */
+export async function mailboxesInUse(s: Settings, since: string): Promise<string[]> {
+  const rows = await query<{ address: string | null }>(
+    `SELECT c.mailbox AS address FROM campaigns c WHERE c.status IN ('active', 'paused')
+     UNION SELECT e.mailbox FROM enrollments e WHERE e.thread_id IS NOT NULL AND (e.status IN ('active', 'paused') OR e.last_sent_at >= ?)`,
+    [since],
+  );
+  const all = new Set<string>();
+  if (s.mailbox) all.add(s.mailbox);
+  for (const r of rows) if (r.address) all.add(r.address);
+  return [...all];
 }
 
 const EDITABLE = [

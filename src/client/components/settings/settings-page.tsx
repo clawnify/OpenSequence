@@ -13,8 +13,9 @@ import { Textarea } from "@/components/ui/textarea";
 import { Picker } from "@/components/ui/picker";
 import { SignatureEditor } from "@/components/signature-editor";
 import { RangesField, zones } from "@/components/sending-hours";
+import { mailboxOptions, whose } from "@/components/mailbox-options";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import type { SettingsView, Signature } from "@/types";
+import type { MailboxPace, SettingsView, Signature } from "@/types";
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -98,8 +99,8 @@ export function SettingsPage() {
                 title="Send from"
                 hint={
                   <>
-                    Use a mailbox on a separate domain for outreach, so your main domain's reputation stays safe. Add it in Clawnify: Integrations, Gmail, Add another account.
-                    {v.live_threads > 0 && ` ${v.live_threads} conversations started from the current mailbox only carry on from it.`}
+                    Campaigns send from it unless they pick their own. Use a mailbox on a separate domain for outreach, so your main domain's reputation stays safe. Add it in Clawnify: Integrations, Gmail, Add another account. An &ldquo;Only me&rdquo; account shows here once its owner lets this app use it.
+                    {v.live_threads > 0 && ` Conversations already started carry on only from the mailbox that started them (${v.live_threads} now).`}
                   </>
                 }
               >
@@ -109,15 +110,9 @@ export function SettingsPage() {
                   disabled={!can || v.mailboxes.length === 0}
                   value={s.mailbox ?? ""}
                   placeholder={v.mailboxes.length ? "Pick a mailbox" : "No Gmail connected"}
-                  options={v.mailboxes.map((m) => ({ value: m.address, label: m.address, hint: m.isDefault ? "The workspace's main Gmail" : undefined }))}
+                  options={mailboxOptions(v.mailboxes, s.mailbox)}
                   onChange={(address) => void save({ mailbox: address })}
                 />
-              </Row>
-              <Row title="Warm up a new mailbox" hint={s.ramp_from ? `Since ${s.ramp_from}: 10 emails a day the first week, 10 more each week, up to the daily cap.` : "A new address starts slowly: 10 emails a day, 10 more each week, up to the daily cap."}>
-                <Switch label="Warm up a new mailbox" checked={!!s.ramp_from} disabled={!can} onChange={(on) => void save({ ramp_from: on ? today() : null })} />
-              </Row>
-              <Row title="Emails a day" hint="All campaigns together. They are spread across the sending hours." htmlFor="cap">
-                <NumberField id="cap" value={s.daily_cap} min={1} max={200} disabled={!can} onSave={(n) => void save({ daily_cap: n })} />
               </Row>
               <Row title="Sending hours" hint="Local time. Nothing goes out outside them, even once approved: approve in the evening and it goes out when they open. Add a second range for a break. A campaign can have its own.">
                 <RangesField ranges={s.send_ranges} disabled={!can} onSave={(r) => void save({ send_ranges: r })} />
@@ -129,9 +124,17 @@ export function SettingsPage() {
                 <Switch label="Weekdays only" checked={s.weekdays_only} disabled={!can} onChange={(on) => void save({ weekdays_only: on })} />
               </Row>
             </Rows>
+            {v.sending.mailboxes.length > 0 && (
+              <Rows label="Mailboxes in use">
+                {v.sending.mailboxes.map((m) => (
+                  <MailboxRow key={m.address} pace={m} whose={(() => { const o = v.mailboxes.find((x) => x.address === m.address); return o ? whose(o) : "Not connected any more"; })()}
+                    editable={can && !!v.mailboxes.find((x) => x.address === m.address)?.can_use} onSaved={() => void view.reload()} />
+                ))}
+              </Rows>
+            )}
             <p className="text-[0.8125rem] text-muted-foreground">
-              {mailboxUnavailable ? "Sending is blocked until the mailbox is reconnected or replaced. " : v.sending.mailbox
-                ? `Today ${v.sending.sent_today} of ${v.sending.cap_today} sent; the next one can go ${due(v.sending.next_send_at)}. `
+              {mailboxUnavailable ? "The workspace mailbox can't send until it is reconnected or replaced. " : v.sending.mailboxes.length
+                ? `Today ${v.sending.sent_today} of ${v.sending.cap_today} sent${v.sending.mailboxes.length > 1 ? ` from ${v.sending.mailboxes.length} mailboxes` : ""}; the next one can go ${due(v.sending.next_send_at)}. `
                 : "Nothing goes out until a mailbox is picked. "}
               {v.sending.last_run_at ? `Replies and booked meetings were last checked ${ago(v.sending.last_run_at)}.` : "Replies and booked meetings haven't been checked yet."}
             </p>
@@ -340,6 +343,41 @@ function TextSetting({ label, value, onSave, rows, max, disabled, placeholder, h
         onBlur={() => text !== value && onSave(text)} />
       {hint && <span className="text-[0.8125rem] font-normal text-muted-foreground">{hint}</span>}
     </label>
+  );
+}
+
+/**
+ * One mailbox in use: its own daily cap and warm-up, which protect its
+ * reputation, and how its day is going. Whoever may send from it may set them.
+ */
+function MailboxRow({ pace: m, whose, editable, onSaved }: { pace: MailboxPace; whose: string; editable: boolean; onSaved: () => void }) {
+  const { setError } = useApp();
+  const save = async (patch: Record<string, unknown>) => {
+    try {
+      await api("PATCH", `/api/mailboxes/${encodeURIComponent(m.address)}`, patch);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not save");
+    }
+    onSaved();
+  };
+  const id = `cap-${m.address}`;
+  return (
+    <Row
+      title={m.address}
+      htmlFor={id}
+      hint={
+        <>
+          {whose}{m.workspace ? ", the workspace mailbox" : ""}. Today {m.sent_today} of {m.cap_today} sent{m.sent_today < m.cap_today ? `; the next can go ${due(m.next_send_at)}` : ""}.
+          {m.ramp_from && ` Warming up since ${m.ramp_from}: 10 a day the first week, 10 more each week, up to its cap.`}
+          {m.error && <span className="block text-warning">{m.error}</span>}
+        </>
+      }
+    >
+      <NumberField id={id} value={m.daily_cap} min={1} max={200} disabled={!editable} onSave={(n) => void save({ daily_cap: n })} />
+      <span className="text-[0.8125rem] text-muted-foreground">a day</span>
+      <Switch label={`Warm up ${m.address}`} checked={!!m.ramp_from} disabled={!editable} onChange={(on) => void save({ ramp_from: on ? today() : null })} />
+      <span className="text-[0.8125rem] text-muted-foreground">Warm up</span>
+    </Row>
   );
 }
 

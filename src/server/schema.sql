@@ -10,8 +10,8 @@ CREATE TABLE IF NOT EXISTS settings (
   signature_id TEXT,                        -- the signature for a first email, unless the campaign picks one; null: none
   reply_signature_id TEXT,                  -- the signature for a follow-up, unless the campaign picks one; null: none
   opt_out TEXT NOT NULL DEFAULT 'P.S. If this isn''t for you, just say so and I won''t write again.', -- under the signature on every email, never empty; any wording works, the AI reads the replies
-  daily_cap INTEGER NOT NULL DEFAULT 30,    -- emails a day, all campaigns together
-  ramp_from TEXT,                           -- YYYY-MM-DD a new mailbox started sending: the daily cap climbs from it
+  daily_cap INTEGER NOT NULL DEFAULT 30,    -- before mailboxes had rows: the first one's cap; now the cap a newly used mailbox starts with
+  ramp_from TEXT,                           -- before mailboxes had rows: the first one's warm-up start
   send_from TEXT NOT NULL DEFAULT '09:00',  -- the sending window, local time
   send_until TEXT NOT NULL DEFAULT '17:00',
   send_ranges TEXT,                         -- JSON [{from, until}]: several stretches of the day; null: send_from to send_until
@@ -27,10 +27,26 @@ CREATE TABLE IF NOT EXISTS settings (
   next_run_at TEXT,
   last_run_at TEXT,
   last_error TEXT,
-  last_sent_at TEXT,                        -- sends are spaced out across the window from here
-  inbox_checked_at TEXT,                    -- received mail is read from here on the next run
-  inbox_cursor TEXT,                        -- JSON {after, page, started}: a read of received mail that didn't finish in one run
+  last_sent_at TEXT,                        -- before mailboxes had rows (now in mailboxes)
+  inbox_checked_at TEXT,                    -- before mailboxes had rows (now in mailboxes)
+  inbox_cursor TEXT,                        -- before mailboxes had rows (now in mailboxes)
+  mailboxes_moved_at TEXT,                  -- when the fields above moved to the mailbox they belonged to (settings.mailbox at the time)
   calendar_checked_at TEXT,                 -- when booked meetings were last looked for
+  updated_at TEXT DEFAULT (datetime('now'))
+);
+
+-- Each sending mailbox's own pace and reading, by address: the daily cap and
+-- warm-up protect one mailbox, so each has its own. A row is made the first
+-- time a mailbox is used; the workspace's first one starts from what Settings
+-- held before mailboxes had rows (daily_cap, ramp_from, last_sent_at, inbox_*).
+CREATE TABLE IF NOT EXISTS mailboxes (
+  address TEXT PRIMARY KEY,
+  daily_cap INTEGER NOT NULL DEFAULT 30,    -- emails a day from it, all campaigns together
+  ramp_from TEXT,                           -- YYYY-MM-DD it started sending: the cap climbs from it; null: no warm-up
+  last_sent_at TEXT,                        -- sends from it are spaced out from here
+  inbox_checked_at TEXT,                    -- its received mail is read from here on the next run
+  inbox_cursor TEXT,                        -- JSON {after, page, started}: a read that didn't finish in one run
+  error TEXT,                               -- why it couldn't be opened the last time it was needed
   updated_at TEXT DEFAULT (datetime('now'))
 );
 
@@ -55,6 +71,7 @@ CREATE TABLE IF NOT EXISTS campaigns (
   signature_id TEXT,                        -- first emails: null = the workspace default, 'none' = no signature, else a signature
   reply_signature_id TEXT,                  -- follow-ups: the same
   send_window TEXT,                         -- JSON {timezone?, ranges?, weekdays_only?}: its own sending hours over the workspace's; null: the workspace's
+  mailbox TEXT,                             -- the Gmail address its emails go out from; null: the workspace's (settings.mailbox)
   source_app_id TEXT,                       -- an app in the workspace that keeps lists of people (OpenProspector); null: none
   source_list_id TEXT,                      -- the list new people come from, every day
   source_list_name TEXT,                    -- its name when it was picked, for the screens
@@ -148,6 +165,7 @@ CREATE TABLE IF NOT EXISTS touches (
   approved_by TEXT,
   approved_at TEXT,
   sending_at TEXT,                          -- handed to Gmail; a run that dies here is checked before anything is sent again
+  mailbox TEXT,                             -- the address it was handed to Gmail from
   sent_at TEXT,
   done_by TEXT,
   created_at TEXT DEFAULT (datetime('now')),

@@ -83,7 +83,9 @@ export function ReviewPage({ tab, touchId, navigate }: { tab: ReviewTab; touchId
     <>
       <PageHeader
         title="Review"
-        meta={sending?.mailbox ? `${sending.mailbox} · ${sending.sent_today} of ${sending.cap_today} sent today` : undefined}
+        meta={sending?.mailboxes.length
+          ? `${sending.mailboxes.length > 1 ? `${sending.mailboxes.length} mailboxes` : sending.mailboxes[0].address} · ${sending.sent_today} of ${sending.cap_today} sent today`
+          : undefined}
       >
         <Button size="sm" variant="outline" onClick={() => void checkNow()} disabled={checking}>
           <RefreshCw className={cn(checking && "animate-spin")} /> Check now
@@ -325,7 +327,7 @@ function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (i
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[0.8125rem] text-muted-foreground">
             {detail.sending
-              ? `Approved: goes out ${earliest(detail.sending.earliest_at)}, in ${hoursOf(detail.sending.window)}.`
+              ? `Approved: ${goesOut(detail.sending)}`
               : `Approved${t.due_at ? `: goes out ${due(laterOf(t.due_at, overview?.sending.next_send_at))}` : ""}, inside the sending hours.`}
           </span>
           <Button size="sm" variant="outline" className="ml-auto" disabled={busy}
@@ -345,7 +347,7 @@ function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (i
           {!canApprove && <span className="text-[0.8125rem] text-muted-foreground">Only a signed-in person can approve.</span>}
           {canApprove && detail.sending && (
             <span className="text-[0.8125rem] text-muted-foreground">
-              Once approved, it goes out {earliest(detail.sending.earliest_at)}, in {hoursOf(detail.sending.window)}.
+              Once approved, {goesOut(detail.sending)}
             </span>
           )}
         </div>
@@ -370,6 +372,12 @@ function EmailEditor({ detail, onSettled }: { detail: TouchDetail; onSettled: (i
 function earliest(iso: string): string {
   const d = due(iso);
   return d === "now" ? "right away" : `${d} at the earliest`;
+}
+
+/** "goes out from x@y tomorrow 09:00 at the earliest, in the sending hours (…)." */
+function goesOut(sending: NonNullable<TouchDetail["sending"]>): string {
+  if (!sending.earliest_at) return "it waits: pick a mailbox for this campaign, or the workspace's in Settings.";
+  return `it goes out from ${sending.mailbox} ${earliest(sending.earliest_at)}, in ${hoursOf(sending.window)}.`;
 }
 
 function hoursOf(w: { timezone: string; ranges: SendRange[]; weekdays_only: boolean; own: boolean }): string {

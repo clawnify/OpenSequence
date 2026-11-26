@@ -85,7 +85,7 @@ export function RepliesPage({ show, navigate }: { show: "open" | "all"; navigate
                   {r.enrollment && <span>· {ENROLLMENT_STATUS[r.enrollment.status]?.label ?? r.enrollment.status}</span>}
                   <span className="ml-auto flex flex-wrap gap-2">
                     <Button size="sm" variant="ghost" asChild>
-                      <a href={gmailLink(mailbox, r.id)} target="_blank" rel="noreferrer noopener"><ExternalLink /> Open in Gmail</a>
+                      <a href={gmailLink(r.mailbox ?? mailbox, r.id)} target="_blank" rel="noreferrer noopener"><ExternalLink /> Open in Gmail</a>
                     </Button>
                     {r.kind === "reply" && r.intent === "out_of_office" && r.enrollment?.status === "replied" && (
                       <Button size="sm" variant="outline" onClick={() => void act(r, "resume")}><Play /> Carry on with the sequence</Button>
