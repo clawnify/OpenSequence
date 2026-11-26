@@ -5,10 +5,39 @@ export type EnrollmentStatus = "active" | "paused" | "replied" | "meeting" | "bo
 export type TouchStatus = "research" | "drafting" | "review" | "approved" | "sending" | "sent" | "todo" | "done" | "skipped" | "failed";
 export type Intent = "interested" | "not_interested" | "unsubscribe" | "out_of_office" | "other";
 
+/** A Gmail account the app can use, as the caller sees it. */
+export interface MailboxOption {
+  address: string;
+  isDefault: boolean;
+  /** One person's own ("Only me") account. */
+  personal: boolean;
+  /** The caller's own. */
+  mine: boolean;
+  /** Whether the caller may send from it: their own, the team's, or anyone's for an owner or admin. */
+  can_use: boolean;
+}
+
+/** One mailbox in use, and its pace today. */
+export interface MailboxPace {
+  address: string;
+  /** The workspace's mailbox: campaigns without their own send from it. */
+  workspace: boolean;
+  daily_cap: number;
+  ramp_from: string | null;
+  cap_today: number;
+  sent_today: number;
+  next_send_at: string;
+  error: string | null;
+}
+
 export interface Sending {
   /** The workspace's sending hours. */
   hours: { timezone: string; ranges: SendRange[]; weekdays_only: boolean };
+  /** The workspace's mailbox. */
   mailbox: string | null;
+  /** Each mailbox in use. */
+  mailboxes: MailboxPace[];
+  /** All mailboxes together. */
   cap_today: number;
   sent_today: number;
   next_send_at: string;
@@ -69,6 +98,10 @@ export interface Campaign {
   reply_signature_id: string | null;
   /** Its own sending hours over the workspace's; null: the workspace's. */
   send_window: SendWindow | null;
+  /** The address it sends from; null: the workspace's. */
+  mailbox: string | null;
+  /** Why the mailbox it sends from couldn't be opened the last time it was needed. */
+  mailbox_error: string | null;
   /** A list in another app of the workspace (OpenProspector) that new people come from, every day. */
   source: CampaignSource | null;
   people: number;
@@ -158,7 +191,7 @@ export interface TouchDetail {
   /** The signature this email gets when it goes out: plain text or HTML. */
   signature: string;
   /** For an email waiting for approval or approved: the earliest it can go out, and in which hours. */
-  sending: { earliest_at: string; window: { timezone: string; ranges: SendRange[]; weekdays_only: boolean; own: boolean } } | null;
+  sending: { earliest_at: string | null; mailbox: string | null; window: { timezone: string; ranges: SendRange[]; weekdays_only: boolean; own: boolean } } | null;
 }
 
 /** What the connected CRM knows about the person, read when a draft is opened (GET /api/touches/:id/crm). */
@@ -189,6 +222,8 @@ export interface Reply {
   person: { id: string; email: string; name: string; company: string; unsubscribed: boolean } | null;
   campaign: { id: string; name: string } | null;
   enrollment: { id: string; status: EnrollmentStatus; reason: string | null } | null;
+  /** The mailbox the thread lives in. */
+  mailbox: string | null;
 }
 
 export interface CampaignPerson {
@@ -228,7 +263,7 @@ export interface SettingsView {
     research_agent_name: string | null;
     research_error: string | null;
   };
-  mailboxes: Array<{ address: string; isDefault: boolean }>;
+  mailboxes: MailboxOption[];
   signatures: Signature[];
   connections: { mail: boolean; calendar: boolean };
   crm_apps: Array<{ id: string; name: string }>;

@@ -17,7 +17,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AddPeopleDialog } from "./add-people-dialog";
 import { RangesField, describeHours, zones } from "@/components/sending-hours";
-import type { Campaign, CampaignPerson, Channel, EnrollmentStatus, Page, PeopleList, Signature, SourceActivity, Step, Writer } from "@/types";
+import { mailboxOptions } from "@/components/mailbox-options";
+import type { Campaign, CampaignPerson, MailboxOption, Channel, EnrollmentStatus, Page, PeopleList, Signature, SourceActivity, Step, Writer } from "@/types";
 
 const CHANNELS: Channel[] = ["email", "call", "linkedin", "task"];
 const WRITER_OPTIONS: Array<{ value: Writer; label: string; hint: string }> = [
@@ -170,6 +171,7 @@ function About({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record
         </span>
       </div>
       <CampaignSignatures campaign={c} onSave={onSave} />
+      <CampaignMailbox campaign={c} onSave={onSave} />
       <CampaignHours campaign={c} onSave={onSave} />
     </section>
   );
@@ -253,6 +255,35 @@ function NumberField({ label, value, min, max, onSave }: { label: string; value:
 }
 
 /** Which signature this campaign's first emails and follow-ups get: the workspace default unless it picks one. */
+/**
+ * The mailbox it sends from: the workspace's, or its own. A person picks it,
+ * from their own mailboxes and the team's; an owner or admin from anyone's.
+ */
+function CampaignMailbox({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record<string, unknown>) => Promise<void> }) {
+  const { overview } = useApp();
+  const data = useLoad<{ mailboxes: MailboxOption[]; workspace: string | null }>("/api/mailboxes");
+  if (!data.data) return null;
+  const { mailboxes, workspace } = data.data;
+  const options = [
+    { value: "", label: workspace ? `The workspace's (${workspace})` : "The workspace's (none picked yet)", hint: "Set in Settings" },
+    ...mailboxOptions(mailboxes, c.mailbox),
+  ];
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label className="flex flex-wrap items-center gap-2 text-sm font-medium">
+        Sends from
+        <Picker label="Sends from" className="w-72" disabled={!overview?.can_approve} value={c.mailbox ?? ""} options={options}
+          onChange={(v) => void onSave({ mailbox: v || null })} />
+      </label>
+      <span className="text-[0.8125rem] text-muted-foreground">
+        {c.live > 0 ? "Conversations already started carry on only from the mailbox that started them: they wait while it sends from another. " : ""}
+        Each mailbox has its own daily cap and warm-up, in Settings.
+      </span>
+      {c.mailbox_error && <Notice>{c.mailbox_error}</Notice>}
+    </div>
+  );
+}
+
 /** The workspace's sending hours, or the campaign's own: for a list in another time zone, or other hours. */
 function CampaignHours({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record<string, unknown>) => Promise<void> }) {
   const { overview } = useApp();

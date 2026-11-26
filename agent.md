@@ -94,6 +94,13 @@ address. People carry `inbox: true` when their address is one.
   "12:00" }, { "from": "14:00", "until": "17:00" }], "weekdays_only": true } }`.
   Any part left out stays the workspace's; `null` goes back to them. An approved
   email waits for its campaign's hours: `GET /api/touches/{id}` → `sending`.
+- Mailbox: a campaign sends from the workspace's mailbox (Settings) unless a
+  person picks its own (`mailbox` on the campaign). Picking one is a person's,
+  never yours: `PATCH` answers 403. A member picks their own mailbox or the
+  team's; an owner or admin picks anyone's. Each mailbox has its own daily cap
+  and warm-up (`GET /api/overview` → `sending.mailboxes`). A conversation
+  carries on only from the mailbox that started it: moving a campaign to
+  another mailbox pauses those, and moving it back resumes them.
 
 ## Replies
 
@@ -111,12 +118,14 @@ address. People carry `inbox: true` when their address is one.
 
 ## Reading failures
 
-- 403 on approve, settings or signatures: those are a person's, by design
-  (picking the research agent is a setting too).
+- 403 on approve, settings, signatures or a campaign's mailbox: those are a
+  person's, by design (picking the research agent is a setting too).
 - 409 on a draft: the touch isn't waiting for one any more (someone wrote it, or
   the person replied and the step was skipped).
 - Nothing is going out: `GET /api/overview` → `sending.last_error` (no mailbox
-  picked, the mailbox isn't connected) and `ready`.
+  picked, a mailbox isn't connected), `sending.mailboxes[].error` and `ready`;
+  for one campaign, its `mailbox_error`. A mailbox that can't be opened holds
+  up only the campaigns sending from it.
 
 ## Costs
 

@@ -1,4 +1,4 @@
-import { createApp, createRoute, widgets, z, caller, user, PageQuery, pageParams, pagedResponse } from "@clawnify/app";
+import { createApp, createRoute, widgets, z, caller, hasRole, user, PageQuery, pageParams, pagedResponse } from "@clawnify/app";
 import { bodyLimit } from "hono/body-limit";
 import { attachmentsOf, attachmentView, attachmentKey, matchesAttachments, decodeAttachment, MAX_ATTACHMENTS, MAX_TOTAL_BYTES } from "./attachments.js";
 import { verifyDelivery } from "@clawnify/queue";
@@ -6,20 +6,23 @@ import type { Context } from "hono";
 import type { CredentialBinding } from "@clawnify/connections";
 import { query, get, run } from "./db.js";
 import {
-  CHANNELS, WRITERS, dayStart, dailyCap, isDay, isHtml, isTimezone, localDay, minutesOf, nextSendAt, normaliseEmail, validateOverride, validateRanges, validateSteps,
+  CHANNELS, WRITERS, dayStart, isDay, isHtml, isTimezone, minutesOf, nextSendAt, normaliseEmail, validateOverride, validateRanges, validateSteps,
   type Window, type WindowOverride,
 } from "./sequence-rules.js";
 import { MAX_SIGNATURE, sanitizeSignature } from "./signature.js";
 import { NO_SIGNATURE, crmNotes, isInbox, signatureFor } from "./sequence-rules.js";
 import {
-  advance, cleanPerson, deleteSignature, endEnrollments, enroll, getSettings, listSignatures, parts, saveSettings, signatureBodies,
+  advance, cleanPerson, deleteSignature, endEnrollments, enroll, getSettings, listSignatures, mailboxOf, mailboxState, parts, saveMailbox, saveSettings, signatureBodies,
   skipOpenTouches, stepsOf, unsubscribe, upsertPerson, type Campaign, type Enrollment, type Person, type Settings, type SettingsPatch,
   type Step, type Touch,
 } from "./store.js";
-import { CrmCheckError, campaignWindow, crmAppOf, crmKeptOut, earliestSend, ensureScheduled, runAndBook, scheduleRun, windowOf, type EngineEnv } from "./engine.js";
+import {
+  CrmCheckError, campaignWindow, capOf, crmAppOf, crmKeptOut, earliestSend, ensureScheduled, inUse, nextFrom, runAndBook, scheduleRun, sentTodayBy, windowOf,
+  type EngineEnv,
+} from "./engine.js";
 import {
   AppAnswerError, connectionStatus, contactApps, crmContactsPage, crmLookup, dropListDemand, gmailSignature, leadApps, listsOf, mailFor, mailboxes, setListDemand, whatWeSell,
-  workspaceAgents,
+  workspaceAgents, type Mailbox,
 } from "./integrations.js";
 
 // In production Clawnify injects the CREDENTIALS broker binding, CLAWNIFY_ORG_ID
@@ -59,6 +62,44 @@ const PERSON_ONLY = "Only a signed-in person can do this: every email is approve
 /** Books a run soon, after something that gives it work. */
 async function kick(c: C): Promise<void> {
   await scheduleRun(c.env, originOf(c), new Date());
+}
+
+/**
+ * Who may send from a mailbox: a signed-in person. A team mailbox is anyone's;
+ * a personal ("Only me") one is its owner's, and owners' and admins', who can
+ * send from anyone's (decided 2026-11-26). Below Team every member is treated
+ * the same, so every member may.
+ */
+function mayUse(c: C, m: Mailbox): boolean {
+  if (!isPerson(c)) return false;
+  if (!m.personal) return true;
+  return (!!m.owner && m.owner === user(c)?.id) || hasRole(c, "admin");
+}
+
+/** A mailbox as a person sees it: whose it is, and whether they may send from it. */
+function mailboxView(c: C, m: Mailbox) {
+  return { address: m.address, isDefault: m.isDefault, personal: m.personal, mine: m.personal && !!m.owner && m.owner === user(c)?.id, can_use: mayUse(c, m) };
+}
+
+/** A mailbox someone wants to send from: connected, usable by the app, and theirs to pick. */
+async function pickMailbox(c: C, raw: unknown): Promise<{ address: string } | { error: string; status: 400 | 403 }> {
+  const address = normaliseEmail(raw);
+  const m = (await mailboxes(c.env)).find((x) => x.address === address);
+  if (!m) return { error: `${address || "That"} isn't a Gmail account this app can use. Connect it in Clawnify, or, for an "Only me" account, let this app use it`, status: 400 };
+  if (!mayUse(c, m)) return { error: `${address} is a teammate's own mailbox: only they, an owner or an admin can send from it`, status: 403 };
+  return { address };
+}
+
+/** Threads paused because their campaign moved to another mailbox carry on once it sends from theirs again. */
+async function resumeThreads(campaignIds: string[], address: string): Promise<void> {
+  for (const chunk of parts(campaignIds)) {
+    await run(
+      `UPDATE enrollments SET status = 'active', reason = NULL, updated_at = datetime('now')
+        WHERE campaign_id IN (${chunk.map(() => "?").join(", ")}) AND status = 'paused' AND paused_until IS NULL AND mailbox = ?
+          AND reason LIKE 'This thread was started from %'`,
+      [...chunk, address],
+    );
+  }
 }
 
 const fail = (c: C, err: unknown, status: 400 | 404 | 409 | 500 = 500) =>
@@ -112,6 +153,8 @@ const CampaignSchema = z.object({
   signature_id: z.string().nullable().openapi({ description: "First emails: null = the workspace default, 'none' = no signature, else a signature id" }),
   reply_signature_id: z.string().nullable().openapi({ description: "Follow-ups: the same" }),
   send_window: SendWindowSchema.nullable().openapi({ description: "Its own sending hours, laid over the workspace's: any part left out is the workspace's. null: the workspace's hours" }),
+  mailbox: z.string().nullable().openapi({ description: "The Gmail address its emails go out from. null: the workspace's (Settings). Only a signed-in person picks it" }),
+  mailbox_error: z.string().nullable().openapi({ description: "Why the mailbox it sends from couldn't be opened the last time it was needed" }),
   source: z.object({
     app_id: z.string(), list_id: z.string(), list_name: z.string(),
     daily: z.number().int().openapi({ description: "New people a day from the list, at most" }),
@@ -194,11 +237,12 @@ const ReplySchema = z.object({
   person: z.object({ id: z.string(), email: z.string(), name: z.string(), company: z.string(), unsubscribed: z.boolean() }).nullable(),
   campaign: z.object({ id: z.string(), name: z.string() }).nullable(),
   enrollment: z.object({ id: z.string(), status: z.string(), reason: z.string().nullable() }).nullable(),
+  mailbox: z.string().nullable().openapi({ description: "The mailbox the thread lives in: open it there" }),
 }).openapi("Reply");
 
 // ── Views ──────────────────────────────────────────────────────────
 
-type CampaignRow = Campaign & { people: number; live: number; reached: number; sent: number; replied: number; meetings: number; bounced: number };
+type CampaignRow = Campaign & { mailbox_error: string | null; people: number; live: number; reached: number; sent: number; replied: number; meetings: number; bounced: number };
 
 const CAMPAIGN_SELECT = `SELECT c.*,
   (SELECT COUNT(*) FROM enrollments e WHERE e.campaign_id = c.id) AS people,
@@ -207,7 +251,8 @@ const CAMPAIGN_SELECT = `SELECT c.*,
   (SELECT COUNT(*) FROM touches t JOIN enrollments e ON e.id = t.enrollment_id WHERE e.campaign_id = c.id AND t.status = 'sent') AS sent,
   (SELECT COUNT(*) FROM enrollments e WHERE e.campaign_id = c.id AND e.status = 'replied') AS replied,
   (SELECT COUNT(*) FROM enrollments e WHERE e.campaign_id = c.id AND e.status = 'meeting') AS meetings,
-  (SELECT COUNT(*) FROM enrollments e WHERE e.campaign_id = c.id AND e.status = 'bounced') AS bounced
+  (SELECT COUNT(*) FROM enrollments e WHERE e.campaign_id = c.id AND e.status = 'bounced') AS bounced,
+  (SELECT m.error FROM mailboxes m WHERE m.address = COALESCE(c.mailbox, (SELECT st.mailbox FROM settings st WHERE st.id = 1))) AS mailbox_error
   FROM campaigns c`;
 
 function campaignView(r: CampaignRow) {
@@ -215,6 +260,7 @@ function campaignView(r: CampaignRow) {
     id: r.id, name: r.name, angle: r.angle, status: r.status, stop_company: !!r.stop_company, audience: r.audience, skip_known: !!r.skip_known,
     signature_id: r.signature_id, reply_signature_id: r.reply_signature_id,
     send_window: overrideOf(r.send_window),
+    mailbox: r.mailbox, mailbox_error: r.mailbox_error ?? null,
     source: r.source_list_id && r.source_app_id
       ? {
         app_id: r.source_app_id, list_id: r.source_list_id, list_name: r.source_list_name ?? "", daily: r.source_daily,
@@ -322,14 +368,26 @@ async function counts() {
 
 async function sendingView(s: Settings, now = new Date()) {
   const w = windowOf(s);
-  const cap = dailyCap(s.daily_cap, s.ramp_from, localDay(now, s.timezone));
-  const sentToday = (await get<{ n: number }>("SELECT COUNT(*) AS n FROM touches WHERE status = 'sent' AND sent_at >= ?", [dayStart(now, w.timezone).toISOString()]))?.n ?? 0;
+  const sentToday = await sentTodayBy(s, now);
+  const boxes = [];
+  for (const address of await inUse(s, now)) {
+    const m = await mailboxState(address, s);
+    boxes.push({
+      address, workspace: address === s.mailbox, daily_cap: m.daily_cap, ramp_from: m.ramp_from, cap_today: capOf(m, s, now),
+      sent_today: sentToday.get(address) ?? 0, next_send_at: nextFrom(m, w, s, now, sentToday).toISOString(), error: m.error,
+    });
+  }
+  const next = boxes.length
+    ? boxes.map((b) => b.next_send_at).sort()[0]
+    : nextSendAt(now, w, s.daily_cap, { sentToday: 0, lastSentAt: null }).toISOString();
   return {
     mailbox: s.mailbox,
+    // Each mailbox in use: its pace today, in the workspace's hours.
+    mailboxes: boxes,
     hours: w,
-    cap_today: cap,
-    sent_today: sentToday,
-    next_send_at: nextSendAt(now, w, cap, { sentToday, lastSentAt: s.last_sent_at }).toISOString(),
+    cap_today: boxes.reduce((n, b) => n + b.cap_today, 0),
+    sent_today: boxes.reduce((n, b) => n + b.sent_today, 0),
+    next_send_at: next,
     last_run_at: s.last_run_at,
     next_run_at: s.next_run_at,
     last_error: s.last_error,
@@ -345,7 +403,10 @@ app.get("/api/overview", async (c) => {
       counts: await counts(),
       sending: await sendingView(s),
       ready: {
-        mailbox: !!s.mailbox && await mailFor(c.env, s.mailbox).then(() => true, () => false),
+        // The workspace mailbox opens; with none, some campaign sends from its own.
+        mailbox: s.mailbox
+          ? await mailFor(c.env, s.mailbox).then(() => true, () => false)
+          : !!(await get("SELECT id FROM campaigns WHERE mailbox IS NOT NULL AND status IN ('active', 'paused') LIMIT 1")),
         about: !!s.about.trim() || (await whatWeSell(c.env, s.about).then((r) => !!r.text, () => true)),
       },
       crm: !!crmAppOf(c.env, s),
@@ -603,6 +664,20 @@ app.patch("/api/campaigns/:id", async (c) => {
       sets.push(`${key} = ?`);
       params.push(v);
     }
+    // The mailbox it sends from, or null for the workspace's: a person's pick, from the mailboxes theirs to use.
+    // Threads started from another mailbox pause when it changes and carry on when it comes back.
+    let mailboxTo: string | null | undefined;
+    if (b.mailbox !== undefined) {
+      if (!isPerson(c)) return c.json({ error: "Only a signed-in person can pick the mailbox a campaign sends from." }, 403);
+      if (b.mailbox === null || b.mailbox === "") mailboxTo = null;
+      else {
+        const picked = await pickMailbox(c, b.mailbox);
+        if ("error" in picked) return c.json({ error: picked.error }, picked.status);
+        mailboxTo = picked.address;
+      }
+      sets.push("mailbox = ?");
+      params.push(mailboxTo);
+    }
     // Its own sending hours over the workspace's, or null for the workspace's. Approved emails follow the new hours.
     if (b.send_window !== undefined) {
       const v = validateOverride(b.send_window);
@@ -646,6 +721,11 @@ app.patch("/api/campaigns/:id", async (c) => {
     }
     if (sets.length) await run(`UPDATE campaigns SET ${sets.join(", ")}, updated_at = datetime('now') WHERE id = ?`, [...params, id]);
     const after = (await campaignById(id))!;
+    if (mailboxTo !== undefined) {
+      const sendsFrom = mailboxOf(after, await getSettings());
+      if (sendsFrom) await resumeThreads([id], sendsFrom);
+      if (after.status === "active") await kick(c);
+    }
     // The list sizes its email lookups by what its campaigns take a day. An
     // archived campaign takes nothing, and one written to inboxes needs no
     // lookups: an inbox comes with its address.
@@ -1118,7 +1198,8 @@ const getTouch = createRoute({
             signature: z.string().openapi({ description: "The signature this email gets when it goes out: plain text or HTML" }),
             what_we_sell: z.string().openapi({ description: "What we sell, as the writer should use it: Settings, or the org's Company Knowledge document when Settings leaves it empty" }),
             sending: z.object({
-              earliest_at: z.string().openapi({ description: "The earliest it can go out once approved: due, inside the hours, under the daily cap. Others approved before it may go first" }),
+              earliest_at: z.string().nullable().openapi({ description: "The earliest it can go out once approved: due, inside the hours, under its mailbox's daily cap. Others approved before it may go first. null: no mailbox to send from" }),
+              mailbox: z.string().nullable().openapi({ description: "The address it goes out from" }),
               window: z.object({ timezone: z.string(), ranges: z.array(RangeSchema), weekdays_only: z.boolean(), own: z.boolean().openapi({ description: "The campaign's own hours, not the workspace's" }) }),
             }).nullable().openapi({ description: "For an email waiting for approval or approved: when it can go out" }),
           }),
@@ -1142,15 +1223,16 @@ app.openapi(getTouch, async (c) => {
     [t.enrollment_id],
   );
   const view = touchView(t);
-  const campaign = await get<{ signature_id: string | null; reply_signature_id: string | null; send_window: string | null }>("SELECT signature_id, reply_signature_id, send_window FROM campaigns WHERE id = ?", [t.campaign_id]);
+  const campaign = await get<{ signature_id: string | null; reply_signature_id: string | null; send_window: string | null; mailbox: string | null }>(
+    "SELECT signature_id, reply_signature_id, send_window, mailbox FROM campaigns WHERE id = ?", [t.campaign_id]);
   const s = await getSettings();
   const signature = signatureFor(view.starts_thread ? "first" : "reply", campaign ?? { signature_id: null, reply_signature_id: null }, s, await signatureBodies());
   const sold = await whatWeSell(c.env, s.about).catch(() => ({ text: "" }));
   let sending = null;
-  if (t.channel === "email" && (t.status === "review" || t.status === "approved")) {
-    const own = campaign?.send_window ?? null;
-    const w: Window = campaignWindow(s, own);
-    sending = { earliest_at: (await earliestSend(s, own, t.due_at, new Date())).toISOString(), window: { ...w, own: !!overrideOf(own) } };
+  if (campaign && t.channel === "email" && (t.status === "review" || t.status === "approved")) {
+    const w: Window = campaignWindow(s, campaign.send_window);
+    const at = await earliestSend(s, campaign, t.due_at, new Date());
+    sending = { earliest_at: at ? at.toISOString() : null, mailbox: mailboxOf(campaign, s), window: { ...w, own: !!overrideOf(campaign.send_window) } };
   }
   return c.json({ touch: view, thread, replies, signature, what_we_sell: sold.text, sending }, 200);
 });
@@ -1531,9 +1613,9 @@ app.openapi(listReplies, async (c) => {
   const rows = await query<{
     message_id: string; kind: "reply" | "auto" | "bounce"; intent: string | null; summary: string | null; excerpt: string; from_email: string; received_at: string; handled_at: string | null;
     maybe_opt_out: number; person_id: string | null; email: string | null; first_name: string | null; last_name: string | null; company: string | null; unsubscribed_at: string | null;
-    campaign_id: string | null; campaign_name: string | null; enrollment_id: string | null; e_status: string | null; e_reason: string | null;
+    campaign_id: string | null; campaign_name: string | null; enrollment_id: string | null; e_status: string | null; e_reason: string | null; e_mailbox: string | null;
   }>(
-    `SELECT i.*, p.email, p.first_name, p.last_name, p.company, p.unsubscribed_at, c.id AS campaign_id, c.name AS campaign_name, e.status AS e_status, e.reason AS e_reason
+    `SELECT i.*, p.email, p.first_name, p.last_name, p.company, p.unsubscribed_at, c.id AS campaign_id, c.name AS campaign_name, e.status AS e_status, e.reason AS e_reason, e.mailbox AS e_mailbox
      ${from}${w} ORDER BY i.received_at DESC LIMIT ? OFFSET ?`,
     [...params, limit, offset],
   );
@@ -1546,6 +1628,7 @@ app.openapi(listReplies, async (c) => {
       } : null,
       campaign: r.campaign_id ? { id: r.campaign_id, name: r.campaign_name ?? "" } : null,
       enrollment: r.enrollment_id ? { id: r.enrollment_id, status: r.e_status ?? "", reason: r.e_reason } : null,
+      mailbox: r.e_mailbox,
     })),
     total, page, limit,
   }, 200);
@@ -1605,7 +1688,7 @@ async function settingsView(c: C) {
     // The Company Knowledge document pinned as "What you sell": used whenever the field is empty.
     about_source: sold.document ? { title: sold.document.title, version: sold.document.version, url: sold.document.url } : null,
     about_source_error: sold.error,
-    mailboxes: boxes,
+    mailboxes: boxes.map((m) => mailboxView(c, m)),
     signatures: (await listSignatures()).map((x) => ({ id: x.id, name: x.name, body: x.body })),
     connections: status,
     crm_apps: apps.map((a) => ({ id: a.id, name: a.name })),
@@ -1649,20 +1732,15 @@ app.put("/api/settings", async (c) => {
     if (b.mailbox !== undefined) {
       if (b.mailbox === null) patch.mailbox = null;
       else {
-        const address = normaliseEmail(b.mailbox);
-        const boxes = await mailboxes(c.env);
-        if (!boxes.some((m) => m.address === address)) return c.json({ error: `${address || "That"} isn't a Gmail account connected in Clawnify` }, 400);
-        patch.mailbox = address;
+        const picked = await pickMailbox(c, b.mailbox);
+        if ("error" in picked) return c.json({ error: picked.error }, picked.status);
+        patch.mailbox = picked.address;
       }
     }
-    if (b.daily_cap !== undefined) {
-      if (typeof b.daily_cap !== "number" || !Number.isInteger(b.daily_cap) || b.daily_cap < 1 || b.daily_cap > 200) return c.json({ error: "daily_cap is a whole number from 1 to 200" }, 400);
-      patch.daily_cap = b.daily_cap;
-    }
-    if (b.ramp_from !== undefined) {
-      if (b.ramp_from !== null && !isDay(b.ramp_from)) return c.json({ error: "ramp_from is a day (YYYY-MM-DD) or null" }, 400);
-      patch.ramp_from = b.ramp_from as string | null;
-    }
+    // The daily cap and warm-up are each mailbox's (PATCH /api/mailboxes/{address});
+    // here they still set the workspace mailbox's, as before mailboxes had their own.
+    const pace = mailboxPace(b);
+    if ("error" in pace) return c.json({ error: pace.error }, 400);
     // Sending hours: one range (send_from, send_until), or several (send_ranges). The
     // first and last ends of the ranges are kept in send_from and send_until too.
     if (b.send_ranges !== undefined) {
@@ -1710,16 +1788,74 @@ app.put("/api/settings", async (c) => {
       }
     }
     const before = await getSettings();
+    // What Settings held for its mailbox moves to that mailbox before Settings points elsewhere.
+    if (patch.mailbox !== undefined && before.mailbox && patch.mailbox !== before.mailbox) await mailboxState(before.mailbox, before);
     const from = minutesOf(patch.send_from ?? before.send_from)!;
     const until = minutesOf(patch.send_until ?? before.send_until)!;
     if (until - from < 30) return c.json({ error: "The sending window is at least 30 minutes, and ends after it starts" }, 400);
+    // The workspace mailbox's pace, under the same rule as PATCH /api/mailboxes/{address}: checked before anything is saved.
+    let paceOf: string | null = null;
+    if (Object.keys(pace.patch).length) {
+      paceOf = patch.mailbox !== undefined ? patch.mailbox ?? null : before.mailbox;
+      if (!paceOf) return c.json({ error: "Pick the mailbox first: the daily cap and warm-up are a mailbox's" }, 400);
+      const allowed = await pickMailbox(c, paceOf);
+      if ("error" in allowed) return c.json({ error: allowed.error }, allowed.status);
+    }
     await saveSettings(patch);
     if (patch.research_agent_id !== undefined && patch.research_agent_id !== before.research_agent_id) {
       await run("UPDATE settings SET research_error = NULL WHERE id = 1");
       if (patch.research_agent_id) await kick(c);
     }
-    if (patch.mailbox && patch.mailbox !== before.mailbox) await kick(c);
+    if (paceOf) {
+      await mailboxState(paceOf, await getSettings());
+      await saveMailbox(paceOf, pace.patch);
+    }
+    if (patch.mailbox && patch.mailbox !== before.mailbox) {
+      const following = await query<{ id: string }>("SELECT id FROM campaigns WHERE mailbox IS NULL");
+      await resumeThreads(following.map((r) => r.id), patch.mailbox);
+      await kick(c);
+    }
     return c.json(await settingsView(c), 200);
+  } catch (err) {
+    return fail(c, err);
+  }
+});
+
+/** A mailbox's daily cap and warm-up as sent: { daily_cap?, ramp_from? }. */
+function mailboxPace(b: Record<string, unknown>): { patch: { daily_cap?: number; ramp_from?: string | null } } | { error: string } {
+  const patch: { daily_cap?: number; ramp_from?: string | null } = {};
+  if (b.daily_cap !== undefined) {
+    if (typeof b.daily_cap !== "number" || !Number.isInteger(b.daily_cap) || b.daily_cap < 1 || b.daily_cap > 200) return { error: "daily_cap is a whole number from 1 to 200" };
+    patch.daily_cap = b.daily_cap;
+  }
+  if (b.ramp_from !== undefined) {
+    if (b.ramp_from !== null && !isDay(b.ramp_from)) return { error: "ramp_from is a day (YYYY-MM-DD) or null" };
+    patch.ramp_from = b.ramp_from as string | null;
+  }
+  return { patch };
+}
+
+// The Gmail accounts this app can use, whose each is, and which the caller may send from.
+app.get("/api/mailboxes", async (c) => {
+  try {
+    const s = await getSettings();
+    return c.json({ mailboxes: (await mailboxes(c.env)).map((m) => mailboxView(c, m)), workspace: s.mailbox }, 200);
+  } catch (err) {
+    return fail(c, err);
+  }
+});
+
+// One mailbox's pace: its daily cap and warm-up. Whoever may send from it may set them.
+app.patch("/api/mailboxes/:address", async (c) => {
+  try {
+    if (!isPerson(c)) return c.json({ error: "Only a signed-in person can change how much a mailbox sends." }, 403);
+    const picked = await pickMailbox(c, decodeURIComponent(c.req.param("address")));
+    if ("error" in picked) return c.json({ error: picked.error }, picked.status);
+    const pace = mailboxPace(await body(c));
+    if ("error" in pace) return c.json({ error: pace.error }, 400);
+    await mailboxState(picked.address, await getSettings());
+    await saveMailbox(picked.address, pace.patch);
+    return c.json({ sending: await sendingView(await getSettings()) }, 200);
   } catch (err) {
     return fail(c, err);
   }

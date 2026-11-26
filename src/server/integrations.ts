@@ -21,10 +21,14 @@ async function connectedServices(env: ConnectionsEnv): Promise<Set<string>> {
 
 // ── The mailbox ────────────────────────────────────────────────────
 
-/** A Gmail account the org has connected, by its address. */
+/** A Gmail account the app can use, by its address. */
 export interface Mailbox {
   address: string;
   isDefault: boolean;
+  /** One person's own ("Only me") account, which they allowed this app to use. */
+  personal: boolean;
+  /** Whose it is, for a personal account: their user id. */
+  owner: string | null;
 }
 
 export interface Mail {
@@ -45,8 +49,13 @@ function gmail(env: ConnectionsEnv, account?: string): Mail["run"] {
   return (action, args) => client.run(`GMAIL_${action}`, args);
 }
 
+/** A personal account's owner, as the platform names it; a team account has none. */
+function ownerOf(a: { personal?: boolean; owner?: string }): { personal: boolean; owner: string | null } {
+  return a.personal && a.owner ? { personal: true, owner: a.owner } : { personal: false, owner: null };
+}
+
 /**
- * The org's Gmail accounts. An account connected before Gmail recorded which
+ * The org's Gmail accounts, and the personal ones their owners allowed this app to use. An account connected before Gmail recorded which
  * address it is can only be the default one: Gmail is asked for its address.
  */
 export async function mailboxes(env: ConnectionsEnv): Promise<Mailbox[]> {
@@ -54,22 +63,22 @@ export async function mailboxes(env: ConnectionsEnv): Promise<Mailbox[]> {
   const out: Mailbox[] = [];
   for (const a of listed.filter((a) => a.account)) {
     const address = await profileAddress(gmail(env, a.account!)).catch(() => "");
-    if (address && address === normaliseEmail(a.account) && !out.some((m) => m.address === address)) out.push({ address, isDefault: a.isDefault });
+    if (address && address === normaliseEmail(a.account) && !out.some((m) => m.address === address)) out.push({ address, isDefault: a.isDefault, ...ownerOf(a) });
   }
   const unnamed = listed.some((a) => !a.account) || (listed.length === 0 && (await connectedServices(env)).has(SERVICES.mail));
   if (unnamed) {
     const address = await profileAddress(gmail(env)).catch(() => "");
-    if (address && !out.some((m) => m.address === address)) out.push({ address, isDefault: true });
+    if (address && !out.some((m) => m.address === address)) out.push({ address, isDefault: true, personal: false, owner: null });
   }
   const google = await accounts(SERVICES.google, env);
   for (const a of google) {
     const mail = googleMail(env, "", a.account ?? undefined);
     const address = await profileAddress(mail.run).catch(() => "");
-    if (address && !out.some((m) => m.address === address)) out.push({ address, isDefault: a.isDefault });
+    if (address && !out.some((m) => m.address === address)) out.push({ address, isDefault: a.isDefault, ...ownerOf(a) });
   }
   if (!google.length && (await connectedServices(env)).has(SERVICES.google)) {
     const address = await profileAddress(googleMail(env, "").run).catch(() => "");
-    if (address && !out.some((m) => m.address === address)) out.push({ address, isDefault: true });
+    if (address && !out.some((m) => m.address === address)) out.push({ address, isDefault: true, personal: false, owner: null });
   }
   return out;
 }

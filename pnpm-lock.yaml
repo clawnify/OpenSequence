@@ -15,8 +15,8 @@ importers:
         specifier: ^0.4.8
         version: 0.4.8(@cloudflare/workers-types@4.20260702.1)(@hono/zod-openapi@0.18.4(hono@4.13.13)(zod@3.25.76))(@phosphor-icons/react@2.1.10(react-dom@19.3.0(react@19.3.0))(react@19.3.0))(hono@4.13.13)(react@19.3.0)
       '@clawnify/connections':
-        specifier: ^0.6.0
-        version: 0.6.0
+        specifier: ^0.8.2
+        version: 0.8.2
       '@clawnify/db':
         specifier: ^0.4.3
         version: 0.4.3(@cloudflare/workers-types@4.20260702.1)
@@ -232,14 +232,14 @@ packages:
       react:
         optional: true
 
-  '@clawnify/connections@0.6.0':
-    resolution: {integrity: sha512-doo/z6mS0on8/cOMp0kkJNDt1ZoRsBEn0X4rJM4lAD7+5wzwoZXY6TcA1Cda4AD3oJp0jDq6Wjm/asrIII7tEQ==}
+  '@clawnify/connections@0.8.2':
+    resolution: {integrity: sha512-h/kKzSPq2R9NU3tIUxnXGv9UqQLe/61iIOrls/Q46gcL4sWojmqwIP3LQuRC9KPJvk2UBfBba15Kwfdf1vzqlg==}
 
   '@clawnify/db@0.4.3':
     resolution: {integrity: sha512-7CqhOilLT3xjyKwO1+B4hfo/Cy2jpkLfpmgXaiQUpKLmvyPYtqOf+3w+QQyGo0QWy5QzjN60HCX0COjk055ldg==}
 
-  '@clawnify/integrations@0.4.0':
-    resolution: {integrity: sha512-epX7r9VHczmjHJuegsn1ogRM9SG8CsYLsyF6hfxN3uV4nDYjdWazNingZnAgOI+ynVj0ZLV8x2rUnNoUUnSuQw==}
+  '@clawnify/integrations@0.5.0':
+    resolution: {integrity: sha512-asGXIsAbSe/W7RLAxW4lLJCuILhw/I+H4KGCRVCRyvxPqm87IuGytNkb3XdgbvFTqj+H73wm05fZJgFMdAO1sQ==}
 
   '@clawnify/knowledge@0.1.0':
     resolution: {integrity: sha512-WOHIfXB2mx7Iu11u0FzkaQSzNz7APxjpkKDfVw16BsdlEXewcUtWgg+VEx5wcciJzfbnrCrCRCvYtMzb3gHeWA==}
@@ -2299,9 +2299,9 @@ snapshots:
       - sql.js
       - sqlite3
 
-  '@clawnify/connections@0.6.0':
+  '@clawnify/connections@0.8.2':
     dependencies:
-      '@clawnify/integrations': 0.4.0
+      '@clawnify/integrations': 0.5.0
 
   '@clawnify/db@0.4.3(@cloudflare/workers-types@4.20260702.1)':
     dependencies:
@@ -2338,7 +2338,7 @@ snapshots:
       - sql.js
       - sqlite3
 
-  '@clawnify/integrations@0.4.0': {}
+  '@clawnify/integrations@0.5.0': {}
 
   '@clawnify/knowledge@0.1.0': {}
 
