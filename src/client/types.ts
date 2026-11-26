@@ -143,6 +143,7 @@ export interface Touch {
   writer: Writer;
   due_at: string | null;
   sent_at: string | null;
+  by_hand: boolean;
   starts_thread: boolean;
   /** For a touch waiting for research: whom it was handed to, when, and how many times. */
   research: { agent_id: string | null; sent_at: string | null; tries: number } | null;
@@ -203,7 +204,10 @@ export interface CampaignPerson {
 
 export interface PersonDetail {
   person: Person;
-  enrollments: Array<{ id: string; campaign: { id: string; name: string }; status: EnrollmentStatus; step: number; due_at: string | null; reason: string | null; last_sent_at: string | null }>;
+  enrollments: Array<{
+    id: string; campaign: { id: string; name: string }; status: EnrollmentStatus; step: number; step_channel: Channel | null;
+    due_at: string | null; reason: string | null; last_sent_at: string | null;
+  }>;
   touches: Touch[];
   replies: Array<{ id: string; kind: string; intent: Intent | null; summary: string | null; excerpt: string; received_at: string }>;
 }
@@ -283,4 +287,13 @@ export interface PeopleList {
   refresh: string;
   member_count: number;
   verified_count: number;
+}
+
+/** An email sent by hand from the campaign mailbox that could count as a step. */
+export interface HandSent {
+  message_id: string;
+  thread_id: string;
+  subject: string;
+  sent_at: string | null;
+  preview: string;
 }

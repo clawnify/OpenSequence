@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Ban, ExternalLink, Pause, Play, Square, Trash2 } from "lucide-react";
+import { Ban, ExternalLink, MailCheck, Pause, Play, Square, Trash2 } from "lucide-react";
 import { useChatContext } from "@clawnify/app/client";
 import { api } from "@/api";
 import { useApp } from "@/context";
@@ -12,7 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { InlineField } from "@/components/ui/inline-field";
 import { Picker } from "@/components/ui/picker";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import type { Campaign, EnrollResult, Page, Person, PersonDetail } from "@/types";
+import type { Campaign, EnrollResult, HandSent, Page, Person, PersonDetail, Touch } from "@/types";
 
 const TOUCH_LABEL: Record<string, string> = {
   research: "Waiting for research",
@@ -31,6 +31,7 @@ export function PersonPage({ id, navigate }: { id: string; navigate: Navigate })
   const { setError, refresh } = useApp();
   const data = useLoad<PersonDetail>(`/api/people/${encodeURIComponent(id)}`);
   const [confirm, setConfirm] = useState<"unsubscribe" | "delete" | null>(null);
+  const [byHand, setByHand] = useState<{ id: string; step: number } | null>(null);
   const p = data.data?.person;
   useChatContext(p ? { label: "Person", record: { type: "person", id: p.id, label: personName(p) } } : null);
 
@@ -108,6 +109,9 @@ export function PersonPage({ id, navigate }: { id: string; navigate: Navigate })
                           {e.reason ?? (e.status === "active" && e.due_at ? `Step ${e.step} ${due(e.due_at)}` : `Step ${e.step}`)}
                         </span>
                         <span className="ml-auto flex gap-1">
+                          {(e.status === "active" || e.status === "paused") && e.step_channel === "email" && (
+                            <Button size="sm" variant="ghost" onClick={() => setByHand({ id: e.id, step: e.step })}><MailCheck /> Sent by hand</Button>
+                          )}
                           {e.status === "active" && <Button size="sm" variant="ghost" onClick={() => void act(() => api("POST", `/api/enrollments/${e.id}/pause`, {}))}><Pause /> Pause</Button>}
                           {e.status === "paused" && <Button size="sm" variant="ghost" onClick={() => void act(() => api("POST", `/api/enrollments/${e.id}/resume`, {}))}><Play /> Resume</Button>}
                           {(e.status === "active" || e.status === "paused") && <Button size="sm" variant="ghost" onClick={() => void act(() => api("POST", `/api/enrollments/${e.id}/stop`, {}))}><Square /> Stop</Button>}
@@ -147,7 +151,7 @@ export function PersonPage({ id, navigate }: { id: string; navigate: Navigate })
                         <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm">
                           <span className="font-medium">{t.channel === "email" ? (t.subject || `Email ${t.position}`) : CHANNEL_LABEL[t.channel]}</span>
                           <span className="text-[0.8125rem] text-muted-foreground">{t.campaign.name} · step {t.position}</span>
-                          <span className="ml-auto text-[0.8125rem] text-muted-foreground">{TOUCH_LABEL[t.status] ?? t.status}{t.sent_at ? ` ${ago(t.sent_at)}` : ""}</span>
+                          <span className="ml-auto text-[0.8125rem] text-muted-foreground">{t.by_hand ? "Sent by hand" : TOUCH_LABEL[t.status] ?? t.status}{t.sent_at ? ` ${ago(t.sent_at)}` : ""}</span>
                         </summary>
                         {t.body ? <p className="mt-2 whitespace-pre-wrap text-[0.8125rem]">{t.body}</p> : t.instructions && <p className="mt-2 text-[0.8125rem] text-muted-foreground">{t.instructions}</p>}
                         {t.status === "review" && (
@@ -162,6 +166,10 @@ export function PersonPage({ id, navigate }: { id: string; navigate: Navigate })
           </div>
         </div>
       </div>
+      {byHand && (
+        <SentByHandDialog enrollmentId={byHand.id} step={byHand.step} email={p.email} onClose={() => setByHand(null)}
+          onDone={() => { setByHand(null); void Promise.all([data.reload(), refresh()]); }} />
+      )}
       <Dialog open={confirm !== null} onOpenChange={(v) => !v && setConfirm(null)}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -220,5 +228,78 @@ function AddToCampaign({ personId, onDone }: { personId: string; onDone: () => v
         })
         .catch((e) => setError(e instanceof Error ? e.message : "Could not add them"));
     }} />
+  );
+}
+
+/**
+ * An email someone sent this person from Gmail, counted as their current step:
+ * the sequence carries on from it, in its thread.
+ */
+function SentByHandDialog({ enrollmentId, step, email, onClose, onDone }: {
+  enrollmentId: string; step: number; email: string; onClose: () => void; onDone: () => void;
+}) {
+  const { setError } = useApp();
+  const [found, setFound] = useState<{ mailbox: string; emails: HandSent[] } | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  const [picked, setPicked] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api<{ mailbox: string; step: number; emails: HandSent[] }>("GET", `/api/enrollments/${encodeURIComponent(enrollmentId)}/sent-by-hand`)
+      .then((r) => { setFound(r); setPicked(r.emails[0]?.message_id ?? ""); })
+      .catch((e) => setProblem(e instanceof Error ? e.message : "Gmail couldn't be read"));
+  }, [enrollmentId]);
+
+  const count = async () => {
+    setBusy(true);
+    try {
+      const r = await api<{ touch: Touch; replies: number }>("POST", `/api/enrollments/${encodeURIComponent(enrollmentId)}/sent-by-hand`, { message_id: picked });
+      const after = r.touch.enrollment;
+      if (r.replies) setError(`Counted. They had already written in that thread: ${after.reason ?? ENROLLMENT_STATUS[after.status].label}.`);
+      onDone();
+    } catch (e) {
+      setProblem(e instanceof Error ? e.message : "That didn't work");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Count an email you sent as step {step}</DialogTitle>
+          <DialogDescription>
+            Step {step} counts as sent, the next step follows from its date, and every later email replies in its thread.
+          </DialogDescription>
+        </DialogHeader>
+        {problem ? (
+          <p className="text-sm text-destructive">{problem}</p>
+        ) : !found ? (
+          <p className="text-sm text-muted-foreground">Looking in Gmail…</p>
+        ) : found.emails.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Nothing in {found.mailbox}'s Sent mail to {email} that could count as step {step}.</p>
+        ) : (
+          <fieldset className="flex max-h-80 flex-col gap-2 overflow-y-auto">
+            <legend className="sr-only">Emails sent from {found.mailbox} to {email}</legend>
+            {found.emails.map((m) => (
+              <label key={m.message_id} className="flex cursor-pointer gap-3 rounded-md p-3 shadow-edge has-[:checked]:bg-accent">
+                <input type="radio" name="sent-by-hand" className="mt-1" value={m.message_id} checked={picked === m.message_id} onChange={() => setPicked(m.message_id)} />
+                <span className="flex min-w-0 flex-col gap-1">
+                  <span className="flex items-baseline gap-2 text-sm">
+                    <span className="truncate font-medium">{m.subject || "(no subject)"}</span>
+                    <span className="ml-auto shrink-0 text-[0.8125rem] text-muted-foreground">{ago(m.sent_at)}</span>
+                  </span>
+                  {m.preview && <span className="line-clamp-2 text-[0.8125rem] text-muted-foreground">{m.preview}</span>}
+                </span>
+              </label>
+            ))}
+          </fieldset>
+        )}
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button disabled={busy || !picked || !!problem} onClick={() => void count()}>Count as step {step}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
