@@ -58,6 +58,11 @@ filling; the app takes the people itself, each hour, up to the number a day.
   up to 500 at a time. An address already here is filled in, not duplicated.
   Put the evidence in `notes`, with links: the writer works from it.
 - People already here: `POST /api/campaigns/{id}/enroll` `{ "emails": [...] }`.
+- Someone emailed them from the campaign mailbox already (by hand, in Gmail):
+  `GET /api/enrollments/{id}/sent-by-hand` lists those emails for their current
+  step, and `POST /api/enrollments/{id}/sent-by-hand` `{ "message_id" }` counts
+  one as that step. Follow-ups then reply in its thread. Do this when the person
+  says they wrote to someone; never write that email again as a draft.
 - Skipped people come back with the reason: asked not to be emailed, bounced,
   already in another live campaign, the wrong kind of address for the
   campaign (below), or known to the CRM ("In your CRM: …": their company is a
@@ -138,7 +143,11 @@ address. People carry `inbox: true` when their address is one.
   its editable source. A prospect does not need a workspace just to receive an image.
 - Read the touch first. Reuse its existing attachment/source on retries instead
   of generating another drawing. Upload the final PNG before handing in the draft:
-  `POST /api/touches/{id}/attachments` (see the live API for the payload and limits).
+  `POST /api/touches/{id}/attachments` as multipart/form-data, the file in the part
+  `file` and `source_url` as a field. On a Clawnify agent that is `clawnify_call_app_api`
+  with `files: [{ "field": "file", "path": "<the PNG on disk>" }]` and
+  `body: { "source_url": "..." }`: the tool reads the file, so never paste its base64.
+  JSON with `data_base64` still works for a client that has only bytes in hand.
   Include `source_url` so a person can open the editable drawing for a later demo.
 - If an upload fails, do not hand in an email claiming the file is attached.
   Report the failure. The email and files wait for a person to review together.

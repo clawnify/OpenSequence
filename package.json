@@ -8,11 +8,11 @@
     "dev": "pnpm db:migrate && concurrently -n ui,api -c cyan,green \"vite\" \"wrangler dev --port 8787\"",
     "build": "vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --test tests/attachments.mjs tests/send-hours.mjs tests/campaign-mailbox.mjs"
+    "test": "node --test tests/attachments.mjs tests/send-hours.mjs tests/sent-by-hand.mjs tests/campaign-mailbox.mjs"
   },
   "dependencies": {
     "@clawnify/agents": "^0.1.1",
-    "@clawnify/app": "^0.4.8",
+    "@clawnify/app": "^0.4.11",
     "@clawnify/connections": "^0.8.2",
     "@clawnify/db": "^0.4.3",
     "@clawnify/knowledge": "^0.1.0",

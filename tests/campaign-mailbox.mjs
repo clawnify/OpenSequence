@@ -30,7 +30,7 @@ function fixture() {
   const db = new DatabaseSync(':memory:'); db.exec(readFileSync('src/server/schema.sql', 'utf8'));
   db.exec(`INSERT INTO settings(id,about,mailbox,send_from,send_until,timezone,weekdays_only,calendar_checked_at)
     VALUES(1,'Test offering','${TEAM}','00:00','23:59','UTC',0,'${now.toISOString()}');`);
-  const sends = []; const broken = new Set();
+  const sends = []; const broken = new Set(); const sentBy = {}; // account → emails it sent by hand
   const env = { CLAWNIFY_ORG_ID: 'test', STORAGE: { async query(sql, params = []) {
     const stmt = db.prepare(sql);
     if (/^\s*(SELECT|PRAGMA|WITH)/i.test(sql) || /\bRETURNING\b/i.test(sql)) return { rows: stmt.all(...params) };
@@ -50,7 +50,8 @@ function fixture() {
       const data = action === 'GMAIL_GET_PROFILE' ? { emailAddress: account }
         : action === 'GMAIL_SETTINGS_SEND_AS_GET' ? { displayName: 'Sender', isPrimary: true }
         : action === 'GMAIL_FETCH_MESSAGE_BY_THREAD_ID' ? { messages: [] }
-        : action === 'GMAIL_FETCH_EMAILS' ? { messages: [] }
+        : action === 'GMAIL_FETCH_EMAILS' ? { messages: String(args.query).includes('in:sent') ? sentBy[account] ?? [] : [] }
+        : action === 'GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID' ? (sentBy[account] ?? []).find((m) => m.messageId === args.message_id) ?? null
         : action === 'GMAIL_SEND_EMAIL' || action === 'GMAIL_REPLY_TO_THREAD' ? (sends.push({ from: account, to: args.recipient_email }), { id: `m${sends.length}`, threadId: `th-${args.recipient_email}` }) : {};
       return { data, successful: true, error: null };
     },
@@ -68,7 +69,7 @@ function fixture() {
     INSERT INTO enrollments(id,campaign_id,person_id,due_at) VALUES('e-${id}','${id}','p-${id}','${due}');
     INSERT INTO touches(id,enrollment_id,step_id,position,channel,status,subject,body,approved_by,approved_at) VALUES('t-${id}','e-${id}','s-${id}',1,'email','approved','Hello','Hi there','reviewer','${now.toISOString()}');`);
   const row = (sql, ...p) => db.prepare(sql).get(...p);
-  return { db, env, sends, broken, call, campaign, row };
+  return { db, env, sends, broken, sentBy, call, campaign, row };
 }
 
 test('who may pick a mailbox: their own or the team\'s; an owner or admin anyone\'s; below Team everyone; never an agent', async () => {
@@ -225,4 +226,21 @@ test('Settings can\'t change the pace of a teammate\'s own mailbox for someone w
   assert.equal((await f.call('PUT', '/api/settings', { daily_cap: 50 }, admin)).status, 200);
   assert.equal(f.row('SELECT daily_cap FROM mailboxes WHERE address = ?', BOB).daily_cap, 50);
   assert.equal((await f.call('PUT', '/api/settings', { mailbox: null, daily_cap: 10 }, admin)).status, 400);
+});
+
+test('an email sent by hand is looked for in the campaign\'s own mailbox, and counts against that mailbox', async () => {
+  const f = fixture(); f.campaign('c', MINE);
+  f.db.exec("UPDATE touches SET status = 'research' WHERE id = 't-c'");
+  f.sentBy[MINE] = [{ messageId: 'h1', threadId: 'th-h', labelIds: ['SENT'], sender: `Me <${MINE}>`, to: 'c@lead.example', subject: 'Hi', messageTimestamp: '2026-11-25T11:00:00.000Z', messageText: 'Hi there' }];
+  const listed = await f.call('GET', '/api/enrollments/e-c/sent-by-hand');
+  assert.equal(listed.status, 200, JSON.stringify(listed.data));
+  assert.equal(listed.data.mailbox, MINE);
+  assert.deepEqual(listed.data.emails.map((m) => m.message_id), ['h1']);
+  assert.equal((await f.call('POST', '/api/enrollments/e-c/sent-by-hand', { message_id: 'h1' })).status, 200);
+  assert.deepEqual({ ...f.row("SELECT mailbox FROM touches WHERE message_id = 'h1'") }, { mailbox: MINE });
+  assert.equal(f.row("SELECT mailbox FROM enrollments WHERE id = 'e-c'").mailbox, MINE);
+  // A thread in another mailbox than the campaign's is refused, with where it lives.
+  f.campaign('d', MINE); f.db.exec(`UPDATE enrollments SET thread_id = 'th-d', mailbox = '${TEAM}' WHERE id = 'e-d'`);
+  const other = await f.call('GET', '/api/enrollments/e-d/sent-by-hand');
+  assert.equal(other.status, 409); assert.match(other.data.error, /team@example.com/);
 });

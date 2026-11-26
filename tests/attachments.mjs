@@ -241,3 +241,29 @@ test('unavailable or mismatched saved mailboxes cannot be selected or reported r
   f.env.CREDENTIALS.executeTool = original;
   assert.equal((await f.call('GET', '/api/overview')).data.ready.mailbox, true);
 });
+
+test('a multipart upload (an agent sending a file from disk) is checked and stored like a base64 one, and reused by it', async () => {
+  const f = fixture();
+  const bytes = Buffer.from(png, 'base64');
+  const form = (parts) => { const fd = new FormData(); for (const [k, v] of Object.entries(parts)) fd.append(k, v); return fd; };
+  const upload = async (fd, who = agent) => {
+    const res = await app.request('/api/touches/t/attachments', { method: 'POST', headers: who, body: fd }, f.env);
+    return { status: res.status, data: await res.json() };
+  };
+  const sent = await upload(form({ file: new File([bytes], 'sketch.png', { type: 'image/png' }), source_url: file.source_url }));
+  assert.equal(sent.status, 200, JSON.stringify(sent.data));
+  const a = sent.data.attachment;
+  assert.deepEqual([a.name, a.content_type, a.size, a.source_url], ['sketch.png', 'image/png', bytes.length, file.source_url]);
+  assert.ok(Buffer.from(f.objects.get(attachmentKey('t', a.id))).equals(bytes));
+  // The same file as base64 JSON is the same attachment.
+  assert.equal((await f.upload()).data.attachment.id, a.id); assert.equal(f.objects.size, 1);
+  // Name and type can be given as fields; a type the bytes don't match, or no file part, is refused.
+  assert.equal((await upload(form({ file: new File([bytes], 'x.bin'), name: 'renamed.png', content_type: 'image/png' }))).data.attachment.name, 'renamed.png');
+  assert.equal((await upload(form({ file: new File([bytes], 'x.pdf', { type: 'application/pdf' }) }))).status, 400);
+  assert.equal((await upload(form({ name: 'nothing.png' }))).status, 400);
+  assert.equal((await upload(form({ file: new File([bytes], 'sketch.png', { type: 'image/png' }) }), {})).status, 403);
+  // And it goes out like any other attachment once approved.
+  await f.draft(); assert.equal((await f.approve(f.touch().attachments && JSON.parse(f.touch().attachments).map((x) => x.id))).status, 200);
+  const out = await runOnce(f.env, now); assert.equal(out.sent, 1, JSON.stringify(out));
+  assert.match(Buffer.from(f.sends[0].raw, 'base64url').toString(), /filename="sketch.png"/);
+});
