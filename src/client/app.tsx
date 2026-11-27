@@ -106,7 +106,7 @@ export function App() {
             {route.name === "review" && <ReviewPage tab={route.tab} touchId={route.touch} navigate={navigate} />}
             {route.name === "replies" && <RepliesPage show={route.show} navigate={navigate} />}
             {route.name === "campaigns" && <CampaignsPage navigate={navigate} />}
-            {route.name === "campaign" && <CampaignPage key={route.id} id={route.id} navigate={navigate} />}
+            {route.name === "campaign" && <CampaignPage key={route.id} id={route.id} tab={route.tab} navigate={navigate} />}
             {route.name === "people" && <PeoplePage navigate={navigate} />}
             {route.name === "person" && <PersonPage key={route.id} id={route.id} navigate={navigate} />}
             {route.name === "settings" && <SettingsPage />}

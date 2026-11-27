@@ -119,7 +119,8 @@ address. People carry `inbox: true` when their address is one.
 ## Pages
 
 - `/`: the review queue, the screen to show for "what's waiting" (screenshot-friendly).
-- `/replies`, `/campaigns/{id}`, `/people/{id}`, `/settings`.
+- `/replies`, `/campaigns/{id}` (its steps; `?tab=people`, `?tab=settings` for the brief,
+  stop rules, mailbox, hours and signatures), `/people/{id}`, `/settings`.
 
 ## Reading failures
 
