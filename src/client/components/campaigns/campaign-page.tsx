@@ -4,10 +4,10 @@ import { useChatCommands, useChatContext } from "@clawnify/app/client";
 import { api } from "@/api";
 import { useApp } from "@/context";
 import { useLoad } from "@/hooks/use-load";
-import type { Navigate } from "@/hooks/use-router";
+import { withQuery, type CampaignTab, type Navigate } from "@/hooks/use-router";
 import { CAMPAIGN_STATUS, CHANNEL_ICON, CHANNEL_LABEL, ENROLLMENT_STATUS, ago, due, personName, plural } from "@/lib/format";
 import { EmptyState, PageHeader, Pager, Pill, SectionTitle } from "@/components/shared";
-import { Notice, Switch } from "@/components/settings-ui";
+import { Notice } from "@/components/settings-ui";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -16,9 +16,9 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AddPeopleDialog } from "./add-people-dialog";
-import { RangesField, describeHours, zones } from "@/components/sending-hours";
-import { mailboxOptions } from "@/components/mailbox-options";
-import type { Campaign, CampaignPerson, MailboxOption, Channel, EnrollmentStatus, Page, PeopleList, Signature, SourceActivity, Step, Writer } from "@/types";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CampaignSettings } from "./campaign-settings";
+import type { Campaign, CampaignPerson, Channel, EnrollmentStatus, Page, PeopleList, SourceActivity, Step, Writer } from "@/types";
 
 const CHANNELS: Channel[] = ["email", "call", "linkedin", "task"];
 const WRITER_OPTIONS: Array<{ value: Writer; label: string; hint: string }> = [
@@ -26,7 +26,13 @@ const WRITER_OPTIONS: Array<{ value: Writer; label: string; hint: string }> = [
   { value: "thread", label: "The AI writes from the thread", hint: "For follow-ups" },
 ];
 
-export function CampaignPage({ id, navigate }: { id: string; navigate: Navigate }) {
+const TABS: Array<{ value: CampaignTab; label: string }> = [
+  { value: "steps", label: "Steps" },
+  { value: "people", label: "People" },
+  { value: "settings", label: "Settings" },
+];
+
+export function CampaignPage({ id, tab, navigate }: { id: string; tab: CampaignTab; navigate: Navigate }) {
   const { setError, refresh } = useApp();
   const data = useLoad<{ campaign: Campaign; steps: Step[]; source_activity?: SourceActivity }>(`/api/campaigns/${encodeURIComponent(id)}`);
   const [peopleKey, setPeopleKey] = useState(0);
@@ -83,10 +89,32 @@ export function CampaignPage({ id, navigate }: { id: string; navigate: Navigate 
           </DropdownMenu>
         )}
       </PageHeader>
+      <div className="shrink-0 border-b border-border px-4 py-2.5 md:px-6">
+        <Tabs value={tab} onValueChange={(v) => navigate(withQuery({ tab: v === "steps" ? null : v }))}>
+          <TabsList>
+            {TABS.map((t) => (
+              <TabsTrigger key={t.value} value={t.value} className="gap-1.5">
+                {t.label}
+                {t.value === "steps" && <span className="tabular text-muted-foreground">{data.data!.steps.length}</span>}
+                {t.value === "people" && <span className="tabular text-muted-foreground">{c.people}</span>}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+        </Tabs>
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4 md:p-6">
-        <div className="mx-auto flex max-w-4xl flex-col gap-8">
-          <About campaign={c} onSave={patch} />
+        {/* Every tab stays mounted, so unsaved steps survive a look at the settings. */}
+        <div hidden={tab !== "steps"} className="mx-auto max-w-4xl">
+          {!c.angle.trim() && (
+            <div className="mb-4">
+              <Notice action={<Button size="sm" variant="outline" onClick={() => navigate(withQuery({ tab: "settings" }))}>Settings</Button>}>
+                Say who this campaign is for in Settings: every draft starts from it.
+              </Notice>
+            </div>
+          )}
           <StepsEditor key={data.data!.steps.map((s) => s.id).join()} campaignId={c.id} steps={data.data!.steps} onSaved={(steps) => data.setData((d) => (d ? { ...d, steps } : d))} />
+        </div>
+        <div hidden={tab !== "people"} className="mx-auto max-w-4xl">
           <section className="flex flex-col gap-3">
             <SectionTitle action={c.status !== "archived" && <Button size="sm" variant="outline" onClick={() => setAdding(true)}><UserPlus /> Add people</Button>}>
               People
@@ -94,6 +122,9 @@ export function CampaignPage({ id, navigate }: { id: string; navigate: Navigate 
             <ListSource campaign={c} activity={data.data?.source_activity} onSave={patch} />
             <CampaignPeople key={peopleKey} campaign={c} navigate={navigate} onChanged={() => void data.reload()} />
           </section>
+        </div>
+        <div hidden={tab !== "settings"}>
+          <CampaignSettings campaign={c} onSave={patch} />
         </div>
       </div>
       <AddPeopleDialog open={adding} onOpenChange={setAdding} campaign={c} onDone={() => { setPeopleKey((k) => k + 1); void data.reload(); void refresh(); }} />
@@ -116,64 +147,6 @@ export function CampaignPage({ id, navigate }: { id: string; navigate: Navigate 
         </DialogContent>
       </Dialog>
     </>
-  );
-}
-
-const AUDIENCES = [
-  { value: "people", label: "Named people" },
-  { value: "inboxes", label: "Company inboxes", hint: "info@, contact@: no first name" },
-];
-
-function About({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record<string, unknown>) => Promise<void> }) {
-  const { overview } = useApp();
-  const [angle, setAngle] = useState(c.angle);
-  const [name, setName] = useState(c.name);
-  useEffect(() => setAngle(c.angle), [c.angle]);
-  useEffect(() => setName(c.name), [c.name]);
-  return (
-    <section className="flex flex-col gap-3">
-      <label className="flex flex-col gap-1.5 text-sm font-medium">
-        Name
-        <Input value={name} maxLength={120} onChange={(e) => setName(e.target.value)} onBlur={() => name.trim() && name !== c.name && void onSave({ name })} className="max-w-md" />
-      </label>
-      <label className="flex flex-col gap-1.5 text-sm font-medium">
-        Who it's for, and why they'd care
-        <Textarea value={angle} rows={3} maxLength={2000} onChange={(e) => setAngle(e.target.value)} onBlur={() => angle !== c.angle && void onSave({ angle })} />
-        <span className="text-[0.8125rem] font-normal text-muted-foreground">Every draft in this campaign starts from it.</span>
-      </label>
-      <div className="flex flex-col gap-1.5">
-        <label className="flex flex-wrap items-center gap-2 text-sm font-medium">
-          Writes to
-          <Picker label="Writes to" className="w-60" value={c.audience} options={AUDIENCES} onChange={(v) => void onSave({ audience: v })} />
-        </label>
-        <span className="text-[0.8125rem] text-muted-foreground">
-          {c.audience === "inboxes"
-            ? "Companies' general addresses (info@, contact@), one a company. Drafts greet the team and ask who handles it, with no first name."
-            : "Named people. Companies' general addresses (info@, contact@) are left out: give them a campaign of their own."}
-          {c.people > 0 && " A change applies to whoever joins next."}
-        </span>
-      </div>
-      <div className="flex items-center gap-3">
-        <Switch checked={c.stop_company} onChange={(v) => void onSave({ stop_company: v })} label="Stop the whole company" />
-        <span className="text-sm">When someone replies or books a meeting, stop writing to everyone else at their company</span>
-      </div>
-      <div className="flex items-start gap-3">
-        <Switch checked={c.skip_known} onChange={(v) => void onSave({ skip_known: v })} label="Skip people your CRM knows" />
-        <span className="text-sm">
-          Leave out anyone whose company is a customer, has an open deal or a call booked, checked in your CRM as they join
-          <span className="block text-[0.8125rem] text-muted-foreground">
-            {overview && !overview.crm
-              ? "No CRM is connected, so nobody is checked."
-              : c.skip_known
-                ? "Turn it off for a campaign meant for customers."
-                : "Off: customers and companies mid-deal can join this campaign."}
-          </span>
-        </span>
-      </div>
-      <CampaignSignatures campaign={c} onSave={onSave} />
-      <CampaignMailbox campaign={c} onSave={onSave} />
-      <CampaignHours campaign={c} onSave={onSave} />
-    </section>
   );
 }
 
@@ -251,98 +224,6 @@ function NumberField({ label, value, min, max, onSave }: { label: string; value:
   return (
     <Input aria-label={label} type="number" inputMode="numeric" min={min} max={max} value={text} className="h-8 w-16"
       onChange={(e) => setText(e.target.value)} onBlur={commit} onKeyDown={(e) => { if (e.key === "Enter") commit(); }} />
-  );
-}
-
-/** Which signature this campaign's first emails and follow-ups get: the workspace default unless it picks one. */
-/**
- * The mailbox it sends from: the workspace's, or its own. A person picks it,
- * from their own mailboxes and the team's; an owner or admin from anyone's.
- */
-function CampaignMailbox({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record<string, unknown>) => Promise<void> }) {
-  const { overview } = useApp();
-  const data = useLoad<{ mailboxes: MailboxOption[]; workspace: string | null }>("/api/mailboxes");
-  if (!data.data) return null;
-  const { mailboxes, workspace } = data.data;
-  const options = [
-    { value: "", label: workspace ? `The workspace's (${workspace})` : "The workspace's (none picked yet)", hint: "Set in Settings" },
-    ...mailboxOptions(mailboxes, c.mailbox),
-  ];
-  return (
-    <div className="flex flex-col gap-1.5">
-      <label className="flex flex-wrap items-center gap-2 text-sm font-medium">
-        Sends from
-        <Picker label="Sends from" className="w-72" disabled={!overview?.can_approve} value={c.mailbox ?? ""} options={options}
-          onChange={(v) => void onSave({ mailbox: v || null })} />
-      </label>
-      <span className="text-[0.8125rem] text-muted-foreground">
-        {c.live > 0 ? "Conversations already started carry on only from the mailbox that started them: they wait while it sends from another. " : ""}
-        Each mailbox has its own daily cap and warm-up, in Settings.
-      </span>
-      {c.mailbox_error && <Notice>{c.mailbox_error}</Notice>}
-    </div>
-  );
-}
-
-/** The workspace's sending hours, or the campaign's own: for a list in another time zone, or other hours. */
-function CampaignHours({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record<string, unknown>) => Promise<void> }) {
-  const { overview } = useApp();
-  const base = overview?.sending.hours;
-  const own = c.send_window;
-  const zoneOptions = useMemo(() => zones(own?.timezone ?? base?.timezone ?? ""), [own?.timezone, base?.timezone]);
-  if (!base) return null;
-  const w = { timezone: own?.timezone ?? base.timezone, ranges: own?.ranges ?? base.ranges, weekdays_only: own?.weekdays_only ?? base.weekdays_only };
-  const save = (part: Partial<typeof w>) => void onSave({ send_window: { ...w, ...part } });
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-start gap-3">
-        <Switch checked={!!own} onChange={(on) => void onSave({ send_window: on ? w : null })} label="Its own sending hours" />
-        <span className="text-sm">
-          Its own sending hours
-          <span className="block text-[0.8125rem] text-muted-foreground">
-            {own
-              ? "For people in another time zone, or other hours. Approved emails wait for them."
-              : `The workspace's: ${describeHours(base)}.`}
-          </span>
-        </span>
-      </div>
-      {own && (
-        <div className="flex flex-wrap items-start gap-x-6 gap-y-2 pl-12">
-          <RangesField ranges={w.ranges} onSave={(ranges) => save({ ranges })} />
-          <Picker label="Time zone" className="w-64" value={w.timezone} options={zoneOptions} searchPlaceholder="Search time zones" onChange={(timezone) => save({ timezone })} />
-          <label className="flex items-center gap-2 text-sm">
-            <Switch checked={w.weekdays_only} onChange={(weekdays_only) => save({ weekdays_only })} label="Weekdays only" />
-            Weekdays only
-          </label>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function CampaignSignatures({ campaign: c, onSave }: { campaign: Campaign; onSave: (b: Record<string, unknown>) => Promise<void> }) {
-  const data = useLoad<{ signatures: Signature[]; defaults: { signature_id: string | null; reply_signature_id: string | null } }>("/api/signatures?limit=100");
-  if (!data.data) return null;
-  const { signatures, defaults } = data.data;
-  const nameOf = (id: string | null) => (id ? signatures.find((x) => x.id === id)?.name ?? "none" : "none");
-  const options = (fallback: string | null) => [
-    { value: "", label: `Default (${nameOf(fallback)})` },
-    { value: "none", label: "No signature" },
-    ...signatures.map((x) => ({ value: x.id, label: x.name })),
-  ];
-  return (
-    <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-      <label className="flex items-center gap-2 text-sm">
-        Signature on first emails
-        <Picker label="Signature on first emails" className="w-60" value={c.signature_id ?? ""} options={options(defaults.signature_id)}
-          onChange={(v) => void onSave({ signature_id: v || null })} />
-      </label>
-      <label className="flex items-center gap-2 text-sm">
-        on follow-ups
-        <Picker label="Signature on follow-ups" className="w-60" value={c.reply_signature_id ?? ""} options={options(defaults.reply_signature_id)}
-          onChange={(v) => void onSave({ reply_signature_id: v || null })} />
-      </label>
-    </div>
   );
 }
 

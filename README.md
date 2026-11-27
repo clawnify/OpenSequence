@@ -24,7 +24,7 @@ Built with **React, Tailwind and shadcn/ui** on a **Hono API** and a **SQLite da
 
 - **Review** (home): drafts to approve, drafts waiting for research or being written, calls and tasks to do, and approved emails waiting to go out.
 - **Replies**: what came back, with the AI's reading, an excerpt, and a link to the message in Gmail.
-- **Campaigns**: each campaign's numbers; its page has the angle, the steps, its signatures and the people in it.
+- **Campaigns**: each campaign's numbers; its page has three tabs: Steps, People, and Settings (who it's for and why, what a reply stops, and the mailbox, sending hours and signatures it sends with).
 - **People**: everyone, with their campaign and status; a person's page has their emails, tasks and replies.
 - **Settings**: the mailbox, sending hours and time zone, daily cap and warm-up, what you sell, the opt-out line, the research agent, the signatures and the CRM. Signatures work as in Gmail: as many as you like, one for first emails and one for follow-ups, and a campaign can pick its own. Edit a signature as you see it or as HTML. Paste a formatted one (from Gmail's signature settings, or copy the mailbox's default from Gmail with a click) and it keeps its links and styling; emails then go out as HTML, the way Gmail sends them.
 

@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 
 export type ReviewTab = "review" | "research" | "drafting" | "todo" | "approved";
+export type CampaignTab = "steps" | "people" | "settings";
 
 export type Route =
   | { name: "review"; tab: ReviewTab; touch?: string }
   | { name: "replies"; show: "open" | "all" }
   | { name: "campaigns" }
-  | { name: "campaign"; id: string }
+  | { name: "campaign"; id: string; tab: CampaignTab }
   | { name: "people" }
   | { name: "person"; id: string }
   | { name: "settings" }
@@ -23,7 +24,10 @@ function parse(pathname: string, search: string): Route {
   if (pathname === "/replies") return { name: "replies", show: q.get("show") === "all" ? "all" : "open" };
   if (pathname === "/campaigns") return { name: "campaigns" };
   const cm = pathname.match(/^\/campaigns\/([^/]+)$/);
-  if (cm) return { name: "campaign", id: decodeURIComponent(cm[1]) };
+  if (cm) {
+    const tab = q.get("tab") === "people" || q.get("tab") === "settings" ? (q.get("tab") as CampaignTab) : "steps";
+    return { name: "campaign", id: decodeURIComponent(cm[1]), tab };
+  }
   if (pathname === "/people") return { name: "people" };
   const pm = pathname.match(/^\/people\/([^/]+)$/);
   if (pm) return { name: "person", id: decodeURIComponent(pm[1]) };
